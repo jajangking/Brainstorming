@@ -1,0 +1,78 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# fake-run — jalankan binary musl di "wadah palsu" (fakechroot) tanpa root,
+# tanpa proot, tanpa chroot. Native speed.
+#
+#   fake-run [--loader=FILE] [ENV=val ...] <program> [args...]
+#
+# Yang dilakukan:
+#   1. cd ke FAKE_BASE (rootfs Alpine).
+#   2. tulis ulang env: PATH/HOME/USER/SHELL/TMPDIR ala chroot.
+#   3. buang LD_PRELOAD/LD_LIBRARY_PATH bionic Termux (bentrok dgn musl).
+#   4. resolve <program>: absolut -> FAKE_BASE+path (kecuali /data /dev /proc /sys);
+#      relatif -> cari di dalam FAKE_BASE dulu.
+#   5. eksekusi via musl loader (default: loader patched, aman seccomp).
+#
+# Isolasi path dilakukan libfakeroot.so (LD_PRELOAD): semua path absolut
+# dari program di-rewrite ke dalam FAKE_BASE. Program TIDAK melihat sistem
+# host (kecuali jalur yang sengaja di-symlink di dalam wadah).
+
+set -euo pipefail
+
+HOME_BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+SHIM="${FAKE_SHIM:-$HOME/libfakeroot.so}"
+LOADER="${FAKE_LOADER:-$HOME/alpine-rootfs/lib/ld-musl-patched.so.1}"
+
+# ambil opsi --loader dan ENV=val di depan
+extra_env=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --loader=*) LOADER="${1#--loader=}"; shift ;;
+        --base=*)   HOME_BASE="${1#--base=}"; shift ;;
+        *=*)        extra_env+=("$1"); shift ;;
+        *)          break ;;
+    esac
+done
+
+[ $# -ge 1 ] || { echo "pemakaian: fake-run [--loader=FILE] [ENV=val ...] <program> [args...]"; exit 2; }
+prog="$1"; shift
+
+# resolve program
+case "$prog" in
+    /data/*|/dev/*|/proc/*|/sys/*|/apex/*|/system/*)
+        host="$prog" ;;
+    /*)
+        host="$HOME_BASE$prog" ;;
+    *)
+        host=""
+        for d in /bin /usr/bin /sbin /usr/sbin /usr/local/bin /usr/local/sbin; do
+            if [ -e "$HOME_BASE$d/$prog" ]; then host="$HOME_BASE$d/$prog"; break; fi
+        done
+        if [ -z "$host" ] && [ -e "$(pwd -P)/$prog" ]; then host="$(pwd -P)/$prog"; fi
+        [ -n "$host" ] || host="$prog"
+        ;;
+esac
+
+[ -e "$SHIM" ] || { echo "fake-run: shim tak ada: $SHIM"; exit 1; }
+[ -x "$LOADER" ] || { echo "fake-run: loader tak ada: $LOADER"; exit 1; }
+[ -e "$host" ] || { echo "fake-run: program tak ada: $host"; exit 1; }
+
+# HOME/TMPDIR/PWD memakai path host-absolut yang SUDAH ada di dalam base.
+# Ini membuat path-pun tetap masuk wadah MESKI dipanggil lewat syscall mentah
+# (bun/node/zig mem-bypass LD_PRELOAD utk sebagian openat), sekaligus menjaga
+# ilusi "/root", "/tmp", "/" bagi yang memakai libc (lewat trim realpath/getcwd).
+mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true
+
+cd "$HOME_BASE"
+
+exec env -i \
+  -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
+  LD_PRELOAD="$SHIM" \
+  FAKE_BASE="$HOME_BASE" \
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  HOME="$HOME_BASE/root" \
+  TMPDIR="$HOME_BASE/tmp" \
+  PWD="$HOME_BASE" \
+  USER=root LOGNAME=root SHELL=/bin/sh \
+  TERM="${TERM:-xterm-256color}" \
+  "${extra_env[@]}" \
+  "$LOADER" "$host" "$@"

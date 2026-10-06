@@ -1,0 +1,7 @@
+# artefak build — jangan di-commit
+*.so
+*.o
+
+# lingkungan wadah — bukan sumber proyek (besar)
+alpine-rootfs/
+alpine-minirootfs.tar.gz
