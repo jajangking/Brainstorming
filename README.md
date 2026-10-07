@@ -18,10 +18,15 @@ curl -sL https://raw.githubusercontent.com/jajangking/Brainstorming/main/install
 ## 🚀 Cara Pakai
 
 ```bash
-fake-run cat /etc/alpine-release    # → 3.24.2
-fake-run sh                          # masuk shell Alpine
-fake-run apk add vim                 # install package
-fake-run --svsp <program>            # paksa supervisor (binary statis)
+alpine                                # masuk shell Alpine (kayak proot-distro login)
+alpine cat /etc/alpine-release        # jalankan command
+alpine apk add vim                    # install package
+alpine -c "ls /etc"                   # jalankan command tanpa masuk shell
+
+# Atau pakai fake-run langsung:
+fake-run cat /etc/alpine-release      # → 3.24.2
+fake-run sh                           # masuk shell
+fake-run --svsp <program>             # paksa supervisor (binary statis)
 ```
 
 ### Contoh: Jalankan Claude Code di Android
@@ -43,6 +48,7 @@ fake-run ~/musl-test/package/claude --version
 
 | Apa | Path |
 |---|---|
+| **Masuk shell** | `alpine` (atau `fake-run sh`) |
 | Wadah Alpine | `~/alpine-rootfs/` |
 | Runner universal | `$PREFIX/bin/fake-run` |
 | Supervisor | `$PREFIX/bin/svsp` |
@@ -53,6 +59,7 @@ fake-run ~/musl-test/package/claude --version
 
 | | proot-distro | Brainstorming |
 |---|---|---|
+| **Masuk shell** | `proot-distro login alpine` | `alpine` |
 | **Kecepatan** | 🐢 Lambat (ptrace) | 🚀 **Native** (1-470 μs/op) |
 | **Root?** | Tidak | Tidak |
 | **Cara kerja** | Emulator syscall | Fake chroot + seccomp supervisor |

@@ -1,0 +1,41 @@
+#!/data/data/com.termux/files/usr/bin/bash
+#
+# alpine — Masuk shell Alpine di wadah palsu (pengganti proot-distro login alpine)
+#
+# Pakai:
+#   alpine                    # masuk shell interaktif
+#   alpine -c "command"       # jalankan command
+#   alpine apk add vim        # jalankan apk langsung
+#
+# Sama kayak `proot-distro login alpine`, tapi native speed.
+
+set -euo pipefail
+
+BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+FR="${FAKE_RUN:-$PREFIX/bin/fake-run}"
+
+# Cek wadah ada
+if [ ! -d "$BASE" ]; then
+    echo "Wadah Alpine belum ada. Install dulu:"
+    echo "  cd ~/Brainstorming && ./install.sh"
+    exit 1
+fi
+
+# Cek fake-run ada
+if [ ! -x "$FR" ]; then
+    echo "fake-run tidak ada. Install dulu:"
+    echo "  cd ~/Brainstorming && ./install.sh"
+    exit 1
+fi
+
+# Masuk shell atau jalankan command
+if [ $# -eq 0 ]; then
+    # Shell interaktif
+    echo "Masuk Alpine 3.24.2 (fake-chroot, native speed)"
+    echo "Ketik 'exit' untuk keluar"
+    echo
+    exec env -u LD_PRELOAD "$FR" --base="$BASE" /bin/sh -l
+else
+    # Jalankan command
+    exec env -u LD_PRELOAD "$FR" --base="$BASE" "$@"
+fi

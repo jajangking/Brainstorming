@@ -206,8 +206,12 @@ install() {
     chmod 0755 "$PREFIX/bin/svsp"
     cp "$SRCFAKE" "$PREFIX/bin/fake-run"
     chmod 0755 "$PREFIX/bin/fake-run"
+    if [ -f "$SRC/alpine" ]; then
+        cp "$SRC/alpine" "$PREFIX/bin/alpine"
+        chmod 0755 "$PREFIX/bin/alpine"
+    fi
     chmod 0755 "$HOME/libfakeroot.so"
-    log "terpasang: $PREFIX/bin/fake-run, $PREFIX/bin/svsp, ~/libfakeroot.so"
+    log "terpasang: $PREFIX/bin/fake-run, $PREFIX/bin/svsp, $PREFIX/bin/alpine, ~/libfakeroot.so"
 }
 
 # ------------------------------------------------------------- verifikasi

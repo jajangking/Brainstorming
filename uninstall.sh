@@ -37,7 +37,7 @@ info "Hapus Brainstorming dari Termux..."
 echo
 
 # Hapus tools
-for f in "$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$HOME/libfakeroot.so"; do
+for f in "$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$PREFIX/bin/alpine" "$HOME/libfakeroot.so"; do
     if [ -f "$f" ] || [ -L "$f" ]; then
         rm -f "$f"
         log "Hapus: $f"
