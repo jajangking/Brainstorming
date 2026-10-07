@@ -168,6 +168,19 @@ setup_passthrough() {
     log "passthrough /dev /proc /sys + root/tmp siap"
 }
 
+# ------------------------------------------------------------- DNS wadah
+# Resolver musl membaca resolv.conf WADAH (path /etc/resolv.conf di-rewrite).
+# Di jaringan seluler, UDP/53 ke resolver publik kadang jatuh -> EAI_AGAIN
+# transient ("Transient name resolution failure"/"bad address", kadang-kadang).
+# Strategi tahan banting: 4 nameserver publik + opsi retry musl. Terbukti
+# empiris: musl 1.2.5 menghormati `options` (timeout:1 attempts:1 -> 1.01s
+# vs 5.01s default).
+setup_dns() {
+    printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\nnameserver 8.8.8.8\nnameserver 8.8.4.4\noptions timeout:2 attempts:3\n' \
+        > "$BASE/etc/resolv.conf"
+    log "resolv.conf wadah: 4 nameserver + retry musl (timeout:2 attempts:3)"
+}
+
 # ------------------------------------------------- symlink applet busybox
 # minirootfs Alpine: bin/cat -> /bin/busybox (ABSOLUT). Dari sisi HOST ini
 # patah (host /bin tak ada busybox) dan fake-run tak bisa resolve. Wajib
@@ -296,6 +309,7 @@ EOF
 provision_rootfs
 musl_dev
 setup_passthrough
+setup_dns
 fix_applet_links
 rewrite_interp
 build_binaries

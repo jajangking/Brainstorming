@@ -44,6 +44,11 @@
 #include <alloca.h>
 #include <utime.h>
 #include <sys/statfs.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <poll.h>
 
 extern char **environ;
 
@@ -88,34 +93,133 @@ static int fk_is_abs(const char *p) { return p && p[0] == '/'; }
     do { if (!next_##fn) next_##fn = dlsym(RTLD_NEXT, #fn); } while (0);
 #define CALL(fn, ...) (next_##fn ? next_##fn(__VA_ARGS__) : (errno = ENOSYS, (__typeof__(next_##fn(__VA_ARGS__)))-1))
 
+/* Android: men-publish anon O_TMPFILE lewat linkat("/proc/self/fd/N") GAGAL
+ * (EACCES/ENOENT) -> apk-tools v3 (dan lain-lain) yang menulis via O_TMPFILE
+ * mati di langkah publish. Mask flag O_TMPFILE -> openat(...,".",O_RDWR)
+ * -> EISDIR -> pemakai jatuh ke fallback nama-temp + renameat (relatif, jalan). */
+#ifdef O_TMPFILE
+#define FK_FLAGS(f) ((f) & ~O_TMPFILE)
+#else
+#define FK_FLAGS(f) (f)
+#endif
+
+/* ---- debug (FK_DEBUG=1 utk melacak open/rename yang gagal) ---- */
+static int fk_dbg_on(void) {
+    static int v = -1;
+    if (v < 0) v = fk_base && getenv("FK_DEBUG") ? 1 : 0;
+    return v;
+}
+static void fk_dbg(const char *fmt, ...) {
+    if (!fk_dbg_on()) return;
+    va_list ap; va_start(ap, fmt);
+    char msg[512]; vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
+    write(2, "[fk] ", 5);
+    write(2, msg, strlen(msg));
+    write(2, "\n", 1);
+}
+
 /* ---- open family ---- */
 int open(const char *path, int flags, ...) {
     mode_t mode = 0;
     va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
     NEXT(open);
-    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); return CALL(open, b, flags, mode); }
-    return CALL(open, path, flags, mode);
+    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); int fd = CALL(open, b, FK_FLAGS(flags), mode); if (fd < 0) fk_dbg("open %s -> %s FAIL errno=%d", path, b, errno); return fd; }
+    return CALL(open, path, FK_FLAGS(flags), mode);
 }
 int open64(const char *path, int flags, ...) {
     mode_t mode = 0;
     va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
     NEXT(open64);
-    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); return CALL(open64, b, flags, mode); }
-    return CALL(open64, path, flags, mode);
+    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); return CALL(open64, b, FK_FLAGS(flags), mode); }
+    return CALL(open64, path, FK_FLAGS(flags), mode);
 }
 int openat(int dirfd, const char *path, int flags, ...) {
     mode_t mode = 0;
     va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
     NEXT(openat);
-    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); return CALL(openat, dirfd, b, flags, mode); }
-    return CALL(openat, dirfd, path, flags, mode);
+    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); int fd = CALL(openat, dirfd, b, FK_FLAGS(flags), mode); if (fd < 0) fk_dbg("openat(%d) %s -> %s FAIL errno=%d", dirfd, path, b, errno); return fd; }
+    return CALL(openat, dirfd, path, FK_FLAGS(flags), mode);
 }
 int openat64(int dirfd, const char *path, int flags, ...) {
     mode_t mode = 0;
     va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
     NEXT(openat64);
-    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); return CALL(openat64, dirfd, b, flags, mode); }
-    return CALL(openat64, dirfd, path, flags, mode);
+    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); return CALL(openat64, dirfd, b, FK_FLAGS(flags), mode); }
+    return CALL(openat64, dirfd, path, FK_FLAGS(flags), mode);
+}
+
+/* ---- mkstemp family ---- 
+ * musl mengimplementasikan mkstemp/mkdtemp/tmpfile dengan megil OPEN INTERNAL
+ * (direct-bound, PLT hanya untuk malloc family) -> shim tak bisa rewrite
+ * template -> file dibuat di path HOST (tak ada) -> ENOENT. Karena itu
+ * interpose FUNGSINYA (yang dipanggil apk dkk lewat PLT), rewrite template,
+ * teruskan ke real. */
+int mkstemp(char *t) {
+    NEXT(mkstemp);
+    if (fk_is_abs(t)) {
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, t);
+        int fd = CALL(mkstemp, b);
+        if (fd < 0) fk_dbg("mkstemp %s -> %s FAIL errno=%d", t, b, errno);
+        return fd;
+    }
+    return CALL(mkstemp, t);
+}
+int mkostemp(char *t, int fl) {
+    NEXT(mkostemp);
+    if (fk_is_abs(t)) {
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, t);
+        int fd = CALL(mkostemp, b, fl);
+        if (fd < 0) fk_dbg("mkostemp %s -> %s FAIL errno=%d", t, b, errno);
+        return fd;
+    }
+    return CALL(mkostemp, t, fl);
+}
+int mkstemps(char *t, int sl) {
+    NEXT(mkstemps);
+    if (fk_is_abs(t)) {
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, t);
+        int fd = CALL(mkstemps, b, sl);
+        if (fd < 0) fk_dbg("mkstemps %s -> %s FAIL errno=%d", t, b, errno);
+        return fd;
+    }
+    return CALL(mkstemps, t, sl);
+}
+int mkostemps(char *t, int sl, int fl) {
+    NEXT(mkostemps);
+    if (fk_is_abs(t)) {
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, t);
+        int fd = CALL(mkostemps, b, sl, fl);
+        if (fd < 0) fk_dbg("mkostemps %s -> %s FAIL errno=%d", t, b, errno);
+        return fd;
+    }
+    return CALL(mkostemps, t, sl, fl);
+}
+char *mkdtemp(char *t) {
+    NEXT(mkdtemp);
+    if (fk_is_abs(t)) {
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, t);
+        char *r = CALL(mkdtemp, b);
+        if (r) memcpy(t, r, strlen(r) + 1);   /* template harus diupdate! */
+        else fk_dbg("mkdtemp %s -> %s FAIL errno=%d", t, b, errno);
+        return r ? t : NULL;
+    }
+    return CALL(mkdtemp, t);
+}
+int creat(const char *p, mode_t m) {
+    NEXT(creat);
+    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(creat, b, m); }
+    return CALL(creat, p, m);
+}
+/* tmpfile musl = mkstemp("/tmp/tmpfile-XXXXXX") internal -> bypass. Buat sendiri
+ * di $BASE/tmp (template base-prefix aman: fk_rewrite meneruskannya apa adanya). */
+FILE *tmpfile(void) {
+    char t[PATH_MAX];
+    snprintf(t, sizeof t, "%s/tmp/tmpfile-XXXXXX", fk_base);
+    int fd = mkstemp(t);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "w+b");
+    if (!f) { close(fd); unlink(t); }
+    return f;
 }
 
 /* ---- stat family ---- */
@@ -224,9 +328,90 @@ static int fk_needs_loader(const char *path) {
     return 0;                                                   /* statik / tanpa PT_INTERP */
 }
 
+/* Script shebang: kernel mem-resolve interp (mis. "#!/bin/sh") di HOST ->
+ * salah (Android /bin/sh ≠ ash wadah). Deteksi "#!" dan jalankan interp
+ * dari dalam base secara eksplisit; interp di-rewrite + dilewatkan ke
+ * fk_exec_one (loader bila perlu). Return: 0=exec berhasil (tak kembali),
+ * -1=gagal (errno ter-set, JANGAN lanjut ke execve polos), -2=bukan script
+ * shebang (biarkan kernel menangani). */
+static int fk_exec_one(const char *hostpath, char *const argv[], char *const envp[]);
+static int fk_try_shebang_exec(const char *hostpath, char *const argv[], char *const envp[]) {
+    NEXT(open);
+    int fd = CALL(open, hostpath, O_RDONLY);
+    if (fd < 0) return -2;
+    char hdr[160];
+    ssize_t n = read(fd, hdr, sizeof hdr - 1);
+    NEXT(close);
+    CALL(close, fd);
+    if (n < 3 || hdr[0] != '#' || hdr[1] != '!') return -2;
+    hdr[n] = '\0';
+    for (ssize_t i = 0; i < n; i++) if (hdr[i] == '\n') { hdr[i] = '\0'; break; }
+    char *p = hdr + 2;
+    while (*p == ' ') p++;
+    char *interp = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    int ilen = (int)(p - interp);
+    if (ilen <= 0 || ilen >= PATH_MAX) return -2;
+    while (*p == ' ' || *p == '\t') p++;
+    char *sarg = p;                        /* argumen shebang opsional */
+    int slen = (int)strlen(sarg);
+    if (interp[0] != '/') return -2;       /* interp relatif: biarkan kernel */
+    char ib[PATH_MAX];
+    memcpy(ib, interp, (size_t)ilen); ib[ilen] = '\0';
+    if (strcmp(ib, hostpath) == 0) return -2;   /* interp == target: hindari loop */
+    char ir[PATH_MAX];
+    fk_rewrite(ir, sizeof ir, ib);
+    int narg = 0;
+    while (argv && argv[narg]) narg++;
+    char **nav = malloc(((size_t)2 + (slen ? 1 : 0) + (size_t)narg) * sizeof(char *));
+    if (!nav) { errno = ENOMEM; return -1; }
+    int m = 0;
+    nav[m++] = ir;
+    if (slen) {
+        nav[m] = malloc((size_t)slen + 1);
+        if (!nav[m]) { free(nav); errno = ENOMEM; return -1; }
+        memcpy(nav[m], sarg, (size_t)slen + 1);
+        m++;
+    }
+    nav[m++] = (char *)hostpath;
+    for (int k = 1; k < narg; k++) nav[m++] = argv[k];
+    nav[m] = NULL;
+    int r = fk_exec_one(ir, nav, envp);
+    free(nav);
+    return r;                              /* -1 kalau interp ikut gagal */
+}
+
+/* envp minimal (apk scrub script env: hanya APK_SCRIPT/APK_PACKAGE) -> script
+ * wadah jalan TANPA shim/LD_PRELOAD/PATH (path host, hpanya rusak). Bila envp
+ * tidak membawa FAKE_BASE wadah, gabungkan environ induk (kunci envp menang). */
+static int fk_env_has_key(char *const envp[], const char *key, size_t klen) {
+    for (int i = 0; envp[i]; i++)
+        if (strncmp(envp[i], key, klen) == 0 && envp[i][klen] == '=') return 1;
+    return 0;
+}
+static char **fk_ensure_wadah_env(char *const envp[]) {
+    if (!envp || fk_env_has_key(envp, "FAKE_BASE", 9)) return (char **)envp;
+    int ne = 0; while (environ && environ[ne]) ne++;
+    int np = 0; while (envp[np]) np++;
+    char **merged = malloc(((size_t)ne + np + 1) * sizeof(char *));
+    if (!merged) return (char **)envp;
+    int m = 0;
+    for (int i = 0; i < np; i++) merged[m++] = envp[i];
+    for (int j = 0; j < ne; j++) {
+        const char *kv = environ[j];
+        const char *eq = strchr(kv, '=');
+        size_t kl = eq ? (size_t)(eq - kv) : strlen(kv);
+        if (!fk_env_has_key(envp, kv, kl)) merged[m++] = (char *)kv;
+    }
+    merged[m] = NULL;
+    return merged;
+}
+
 /* exec satu path (sudah di-rewrite ke host) — lewat loader patched bila perlu,
  * persis jalur cepat fake-run: loader host argv... (argv target dipertahankan). */
 static int fk_exec_one(const char *hostpath, char *const argv[], char *const envp[]) {
+    char **menv = fk_ensure_wadah_env(envp);
+    char *const *e2 = (char *const *)menv;
     if (fk_needs_loader(hostpath)) {
         const char *loader = fk_loader_path();
         int n = 0;
@@ -242,12 +427,14 @@ static int fk_exec_one(const char *hostpath, char *const argv[], char *const env
         for (int k = 1; k < n; k++) nav[m++] = argv[k];  /* skip argv[0] */
         nav[m] = NULL;
         NEXT(execve);
-        int r = CALL(execve, loader, nav, envp);
+        int r = CALL(execve, loader, nav, e2);
         free(nav);
         return r;
     }
+    int r = fk_try_shebang_exec(hostpath, argv, e2);
+    if (r != -2) return r;                   /* script shebang: hasil sudah final */
     NEXT(execve);
-    return CALL(execve, hostpath, argv, envp);
+    return CALL(execve, hostpath, argv, e2);
 }
 
 /* ---- exec family ---- */
@@ -316,7 +503,7 @@ int execv(const char *p, char *const argv[]) {
 /* ---- stdio ---- */
 FILE *fopen(const char *p, const char *m) {
     NEXT(fopen);
-    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(fopen, b, m); }
+    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); FILE *f = CALL(fopen, b, m); if (!f) fk_dbg("fopen %s -> %s FAIL errno=%d", p, b, errno); return f; }
     return CALL(fopen, p, m);
 }
 FILE *fopen64(const char *p, const char *m) {
@@ -357,19 +544,26 @@ int fchmodat(int dirfd, const char *p, mode_t m, int fl) {
     return CALL(fchmodat, dirfd, p, m, fl);
 }
 int chown(const char *p, uid_t u, gid_t g) {
-    NEXT(chown);
-    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(chown, b, u, g); }
-    return CALL(chown, p, u, g);
+    /* Fakeroot-style: chown selalu EPERM tanpa root — berpura-pura sukses.
+     * (file tetap milik user; wadah single-user, uid/gid 0 tak terpakai.) */
+    (void)p; (void)u; (void)g;
+    errno = 0;
+    return 0;
 }
 int lchown(const char *p, uid_t u, gid_t g) {
-    NEXT(lchown);
-    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(lchown, b, u, g); }
-    return CALL(lchown, p, u, g);
+    (void)p; (void)u; (void)g;
+    errno = 0;
+    return 0;
+}
+int fchown(int fd, uid_t u, gid_t g) {
+    (void)fd; (void)u; (void)g;
+    errno = 0;
+    return 0;
 }
 int fchownat(int dirfd, const char *p, uid_t u, gid_t g, int fl) {
-    NEXT(fchownat);
-    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(fchownat, dirfd, b, u, g, fl); }
-    return CALL(fchownat, dirfd, p, u, g, fl);
+    (void)dirfd; (void)p; (void)u; (void)g; (void)fl;
+    errno = 0;
+    return 0;
 }
 int mkdir(const char *p, mode_t m) {
     NEXT(mkdir);
@@ -411,7 +605,9 @@ int rename(const char *a, const char *b2) {
     if (fk_is_abs(a) || fk_is_abs(b2)) {
         char x[PATH_MAX], y[PATH_MAX];
         fk_rewrite(x, sizeof x, a); fk_rewrite(y, sizeof y, b2);
-        return CALL(rename, x, y);
+        int r = CALL(rename, x, y);
+        if (r < 0) fk_dbg("rename %s->%s (%s->%s) FAIL errno=%d", a, b2, x, y, errno);
+        return r;
     }
     return CALL(rename, a, b2);
 }
@@ -543,6 +739,446 @@ char *getcwd(char *buf, size_t n) {
     return r;
 }
 char *getwd(char *buf) { return getcwd(buf, PATH_MAX); }
+
+/* ------------------------------------------------------------------ */
+/* 3. Resolver DNS sendiri (getaddrinfo / gethostbyname)              */
+/*    LATAR: di libc musl (dibangun direct-call, PLT hanya utk malloc  */
+/*    family), baca /etc/resolv.conf + /etc/hosts DI DALAM resolver    */
+/*    TIDAK lewat PLT -> LD_PRELOAD shim tak bisa me-rewrite kedua file */
+/*    itu. Akibatnya di jalur cepat nama tak pernah ter-resolve: musl   */
+/*    baca resolv.conf HOST (tak ada di Android) -> fallback 127.0.0.1  */
+/*    -> timeout 5s -> EAI_AGAIN = "DNS: transient error" (apk) /      */
+/*    "bad address" (wget/ping). Jalur svsp aman (rewrite di level      */
+/*    syscall), jalur shim tidak.                                      */
+/*    SOLUSI: shim meng-ekspor getaddrinfo/gethostbyname sendiri yang   */
+/*    membaca config DI WADAH (base-prefix, lewat open REAL) lalu query */
+/*    UDP mentah ke tiap nameserver secara paralel dgn retry — persis   */
+/*    gaya __res_msend musl. Numerik/hosts tetap instan.                */
+/* ------------------------------------------------------------------ */
+#define FK_MAXA 8
+struct fk_dns_ans { int n4; unsigned char v4[FK_MAXA][4]; int n6; unsigned char v6[FK_MAXA][16]; };
+
+/* baca file (path SUDAH base-prefix) lewat open REAL (dlsym) — bebas
+ * interpose sehingga tidak terjadi double-rewrite. */
+static int fk_read_into(const char *path, char *buf, size_t bufsz) {
+    NEXT(open);
+    int fd = CALL(open, path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, bufsz - 1);
+    int e = errno;
+    close(fd);
+    errno = e;
+    if (n < 0) return -1;
+    buf[n] = '\0';
+    return (int)n;
+}
+
+static void fk_free_chain(struct addrinfo *res) {
+    while (res) {
+        struct addrinfo *n = res->ai_next;
+        free(res->ai_canonname);
+        free(res->ai_addr);
+        free(res);
+        res = n;
+    }
+}
+
+static struct addrinfo *fk_mkaddr(int family, const void *src, int port, int socktype,
+                                  int protocol, char *canon) {
+    size_t slen = family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    struct addrinfo *ai = calloc(1, sizeof *ai);
+    if (!ai) { free(canon); return NULL; }
+    ai->ai_addr = calloc(1, slen);
+    if (!ai->ai_addr) { free(canon); free(ai); return NULL; }
+    ai->ai_family  = family;
+    ai->ai_socktype = socktype;
+    ai->ai_protocol = protocol;
+    ai->ai_addrlen  = slen;
+    ai->ai_canonname = canon;               /* kepemilikan pindah; bisa NULL */
+    if (family == AF_INET) {
+        struct sockaddr_in *s4 = (struct sockaddr_in *)ai->ai_addr;
+        s4->sin_family = AF_INET;
+        s4->sin_port   = htons((unsigned short)port);
+        memcpy(&s4->sin_addr, src, 4);
+    } else {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ai->ai_addr;
+        s6->sin6_family = AF_INET6;
+        s6->sin6_port   = htons((unsigned short)port);
+        memcpy(&s6->sin6_addr, src, 16);
+    }
+    return ai;
+}
+
+static int fk_port_of(const char *service) {
+    if (!service || !*service) return 0;
+    if (*service >= '0' && *service <= '9') {
+        long v = strtol(service, NULL, 10);
+        return (v > 0 && v < 65536) ? (int)v : 0;
+    }
+    static const struct { const char *n; int p; } svc[] = {
+        {"http",80},{"https",443},{"ftp",21},{"ssh",22},{"telnet",23},{"smtp",25},
+        {"domain",53},{"dns",53},{"ntp",123},{"imap",143},{"imaps",993},{"pop3",110},
+        {"pop3s",995},{"tftp",69},{"nntp",119},{"ldap",389},{"ldaps",636},{"sip",5060},
+    };
+    for (size_t i = 0; i < sizeof svc / sizeof *svc; i++)
+        if (!strcmp(svc[i].n, service)) return svc[i].p;
+    return 0;
+}
+
+/* encode nama -> label DNS; -1 bila terlalu panjang */
+static int fk_dn_enc(char *out, const char *name) {
+    int o = 0;
+    const char *p = name;
+    for (;;) {
+        const char *dot = strchr(p, '.');
+        size_t l = dot ? (size_t)(dot - p) : strlen(p);
+        if (l) {
+            if (l > 63 || o + (int)l + 1 > 255) return -1;
+            out[o++] = (char)l;
+            memcpy(out + o, p, l);
+            o += (int)l;
+        }
+        if (!dot) break;
+        p = dot + 1;
+        if (!*p) break;                     /* titik di ujung = sudah root */
+    }
+    out[o++] = 0;
+    return o;
+}
+
+/* lewati satu nama (mendukung pointer kompresi); posisi setelah nama */
+static int fk_dn_skip(const unsigned char *msg, size_t msglen, size_t *off) {
+    size_t p = *off;
+    if (p >= msglen) return -1;
+    for (;;) {
+        if (p >= msglen) return -1;
+        unsigned char l = msg[p];
+        if (l == 0) { p++; break; }
+        if ((l & 0xc0) == 0xc0) { p += 2; break; }          /* pointer 14-bit */
+        if ((l & 0xc0) != 0) return -1;
+        p += 1 + l;
+    }
+    *off = p;
+    return 0;
+}
+
+static int fk_build_query(unsigned char *msg, size_t cap, const char *name, int qtype,
+                          unsigned short id) {
+    if (cap < 512) return -1;
+    int o = 0;
+    msg[o++] = (unsigned char)(id >> 8); msg[o++] = (unsigned char)id;
+    msg[o++] = 0x01; msg[o++] = 0x00;                       /* RD */
+    msg[o++] = 0x00; msg[o++] = 0x01;                       /* QDCOUNT=1 */
+    msg[o++] = 0x00; msg[o++] = 0x00;
+    msg[o++] = 0x00; msg[o++] = 0x00;
+    msg[o++] = 0x00; msg[o++] = 0x00;
+    char enc[256];
+    int el = fk_dn_enc(enc, name);
+    if (el < 0) return -1;
+    memcpy(msg + o, enc, (size_t)el); o += el;
+    msg[o++] = (unsigned char)(qtype >> 8); msg[o++] = (unsigned char)qtype;
+    msg[o++] = 0x00; msg[o++] = 0x01;                       /* class IN */
+    return o;
+}
+
+/* query satu tipe ke SEMUA nameserver paralel; hasil ditambahkan ke ans.
+ * return: 0 = dapat; 1 = NXDOMAIN/tanpa record; -1 = timeout/syscall error */
+static int fk_dns_query(const char *name, int qtype, struct sockaddr_in *ns, int nns,
+                        int timeout_ms, int attempts, struct fk_dns_ans *ans) {
+    unsigned short id = (unsigned short)((getpid() ^ (unsigned)time(NULL)) & 0xffff);
+    unsigned char msg[512];
+    int ml = fk_build_query(msg, sizeof msg, name, qtype, id);
+    if (ml < 0) return -1;
+    int fds[8], nf = 0;
+    for (int i = 0; i < nns && nf < 8; i++) {
+        int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) continue;
+        if (sendto(fd, msg, (size_t)ml, 0, (struct sockaddr *)&ns[i], sizeof ns[i]) < 0) {
+            close(fd); continue;
+        }
+        fds[nf++] = fd;
+    }
+    if (nf == 0) return -1;
+    int rc = -1;
+    for (int a = 0; a < attempts; a++) {
+        struct pollfd pf[8];
+        for (int i = 0; i < nf; i++) { pf[i].fd = fds[i]; pf[i].events = POLLIN; pf[i].revents = 0; }
+        int pr = poll(pf, (nfds_t)nf, timeout_ms);
+        if (pr > 0) {
+            for (int i = 0; i < nf; i++) {
+                if (!(pf[i].revents & POLLIN)) continue;
+                unsigned char buf[4096];
+                ssize_t n = recv(fds[i], buf, sizeof buf, 0);
+                if (n < 12) continue;
+                if (buf[0] != (unsigned char)(id >> 8) || buf[1] != (unsigned char)id) continue;
+                if (!(buf[2] & 0x80)) continue;             /* QR=jawaban */
+                int rcode = buf[3] & 0x0f;
+                if (rcode == 3) { rc = 1; break; }          /* NXDOMAIN */
+                if (rcode != 0) continue;                   /* SERVFAIL dll → server lain */
+                int qdc = (buf[4] << 8) | buf[5];
+                int anc = (buf[6] << 8) | buf[7];
+                size_t off = 12;
+                int okq = 1;
+                for (int q = 0; q < qdc && okq; q++) { if (fk_dn_skip(buf, (size_t)n, &off)) okq = 0; else off += 4; }
+                if (!okq) continue;
+                int got = 0;
+                for (int r = 0; r < anc; r++) {
+                    if (fk_dn_skip(buf, (size_t)n, &off)) break;
+                    if (off + 10 > (size_t)n) break;
+                    int type = (buf[off] << 8) | buf[off + 1];
+                    int rdlen = (buf[off + 8] << 8) | buf[off + 9];
+                    unsigned char *rd = buf + off + 10;
+                    if (off + 10 + (size_t)rdlen > (size_t)n) break;
+                    if (type == 1 && rdlen == 4 && ans->n4 < FK_MAXA) {
+                        memcpy(ans->v4[ans->n4++], rd, 4); got++;
+                    } else if (type == 28 && rdlen == 16 && ans->n6 < FK_MAXA) {
+                        memcpy(ans->v6[ans->n6++], rd, 16); got++;
+                    }
+                    off += 10 + (size_t)rdlen;
+                }
+                rc = got ? 0 : 1;
+                break;
+            }
+            if (rc == 0 || rc == 1) break;
+            rc = -1;
+        }
+        if (a + 1 < attempts)
+            for (int i = 0; i < nf; i++)
+                sendto(fds[i], msg, (size_t)ml, 0, (struct sockaddr *)&ns[i], sizeof ns[i]);
+    }
+    for (int i = 0; i < nf; i++) close(fds[i]);
+    return rc;
+}
+
+/* parse nameserver (paralel) + options timeout/attempts dari resolv.conf wadah */
+static int fk_load_resolv(struct sockaddr_in *ns, int max, int *timeout_ms, int *attempts) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/etc/resolv.conf", fk_base);
+    char buf[4096];
+    if (fk_read_into(path, buf, sizeof buf) < 0) return 0;
+    char *s = strdup(buf);
+    if (!s) return 0;
+    int cnt = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(s, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!strncmp(line, "nameserver", 10) && (line[10] == ' ' || line[10] == '\t')) {
+            char *ip = line + 10;
+            while (*ip == ' ' || *ip == '\t') ip++;
+            char ipb[64]; int k = 0;
+            while (*ip && *ip != ' ' && *ip != '\t' && *ip != '\n' && k < 63) ipb[k++] = *ip++;
+            ipb[k] = 0;
+            if (cnt < max && inet_pton(AF_INET, ipb, &ns[cnt].sin_addr) == 1) {
+                ns[cnt].sin_family = AF_INET;
+                ns[cnt].sin_port   = htons(53);
+                cnt++;
+            }
+        } else if (!strncmp(line, "options", 7) && (line[7] == ' ' || line[7] == '\t')) {
+            char *o = line + 7;
+            while (*o) {
+                while (*o == ' ' || *o == '\t') o++;
+                if (!strncmp(o, "timeout:", 8)) { long v = strtol(o + 8, NULL, 10); if (v >= 1 && v <= 30) *timeout_ms = (int)v * 1000; }
+                else if (!strncmp(o, "attempts:", 9)) { long v = strtol(o + 9, NULL, 10); if (v >= 1 && v <= 10) *attempts = (int)v; }
+                while (*o && *o != ' ' && *o != '\t') o++;
+            }
+        }
+    }
+    free(s);
+    return cnt;
+}
+
+/* lookup di /etc/hosts wadah; nama dicocokkan case-insensitive */
+static void fk_hosts_lookup(const char *name, struct fk_dns_ans *ans) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/etc/hosts", fk_base);
+    char buf[8192];
+    if (fk_read_into(path, buf, sizeof buf) < 0) return;
+    char *s = strdup(buf);
+    if (!s) return;
+    char *save = NULL;
+    for (char *line = strtok_r(s, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char *c = strchr(line, '#');
+        if (c) *c = 0;
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) continue;
+        char ip[64]; int k = 0;
+        while (*p && *p != ' ' && *p != '\t' && k < 63) ip[k++] = *p++;
+        ip[k] = 0;
+        struct in_addr a4; struct in6_addr a6;
+        int is6 = inet_pton(AF_INET, ip, &a4) != 1;
+        if (is6 && inet_pton(AF_INET6, ip, &a6) != 1) continue;
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            char n2[256]; int k2 = 0;
+            while (*p && *p != ' ' && *p != '\t' && k2 < 255) n2[k2++] = *p++;
+            n2[k2] = 0;
+            if (!k2) break;
+            if (!strcasecmp(n2, name)) {
+                if (!is6 && ans->n4 < FK_MAXA) memcpy(ans->v4[ans->n4++], &a4, 4);
+                else if (is6 && ans->n6 < FK_MAXA) memcpy(ans->v6[ans->n6++], &a6, 16);
+                break;
+            }
+        }
+    }
+    free(s);
+}
+
+int getaddrinfo(const char *name, const char *service, const struct addrinfo *hints,
+                struct addrinfo **res) {
+    if (res) *res = NULL;
+    struct addrinfo h;
+    memset(&h, 0, sizeof h);
+    if (hints) h = *hints;
+    int fam = h.ai_family;                                  /* 0=UNSPEC */
+    int socktype = h.ai_socktype ? h.ai_socktype : SOCK_STREAM;
+    int proto = socktype == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP;
+    int port = fk_port_of(service);
+
+    /* NULL host: AI_PASSIVE → any; selainnya → loopback */
+    if (!name) {
+        int f = fam == AF_INET6 ? AF_INET6 : AF_INET;
+        struct addrinfo *ai;
+        if (f == AF_INET6) {
+            struct in6_addr any = IN6ADDR_ANY_INIT, lo = IN6ADDR_LOOPBACK_INIT;
+            ai = fk_mkaddr(AF_INET6, (h.ai_flags & AI_PASSIVE) ? &any : &lo, port, socktype, proto, NULL);
+        } else {
+            struct in_addr any = {0}, lo = { htonl(INADDR_LOOPBACK) };
+            ai = fk_mkaddr(AF_INET, (h.ai_flags & AI_PASSIVE) ? &any : &lo, port, socktype, proto, NULL);
+        }
+        if (!ai) return -EAI_MEMORY;
+        *res = ai;
+        return 0;
+    }
+
+    /* IP literal → langsung (tidak perlu DNS; inet_pton murni) */
+    struct in_addr na4; struct in6_addr na6;
+    int is_v4 = inet_pton(AF_INET, name, &na4) == 1;
+    int is_v6 = !is_v4 && inet_pton(AF_INET6, name, &na6) == 1;
+    if (is_v4 || is_v6) {
+        if (fam == AF_INET && is_v6) return -EAI_NONAME;   /* tanpa V4MAPPED */
+        if (fam == AF_INET6 && is_v4) return -EAI_NONAME;
+        int f = is_v4 ? AF_INET : AF_INET6;
+        struct addrinfo *ai = fk_mkaddr(f, is_v4 ? (void *)&na4 : (void *)&na6, port, socktype, proto, NULL);
+        if (!ai) return -EAI_MEMORY;
+        *res = ai;
+        return 0;
+    }
+
+    /* nama: /etc/hosts wadah dulu, lalu DNS (v4 dulu, v6 menyusul) */
+    struct fk_dns_ans ans = {0};
+    fk_hosts_lookup(name, &ans);
+
+    int need4 = (fam == AF_UNSPEC || fam == AF_INET) && ans.n4 == 0;
+    int need6 = (fam == AF_UNSPEC || fam == AF_INET6) && ans.n6 == 0;
+    if (need4 || need6) {
+        struct sockaddr_in ns[8];
+        int tmo = 2000, att = 3;
+        int nns = fk_load_resolv(ns, 8, &tmo, &att);
+        if (nns == 0) {                                     /* fallback publik */
+            ns[0].sin_family = AF_INET; ns[0].sin_port = htons(53);
+            inet_pton(AF_INET, "1.1.1.1", &ns[0].sin_addr);
+            ns[1] = ns[0]; inet_pton(AF_INET, "8.8.8.8", &ns[1].sin_addr);
+            nns = 2;
+        }
+        if (need4) {
+            int rc = fk_dns_query(name, 1, ns, nns, tmo, att, &ans);
+            if (rc < 0 && ans.n4 + ans.n6 == 0) return -EAI_AGAIN;
+        }
+        if (need6) {
+            int rc = fk_dns_query(name, 28, ns, nns, tmo, att, &ans);
+            if (rc < 0 && ans.n4 + ans.n6 == 0) return -EAI_AGAIN;
+        }
+    }
+
+    int n4 = (fam == AF_INET6) ? 0 : ans.n4;
+    int n6 = (fam == AF_INET) ? 0 : ans.n6;
+    if (n4 + n6 == 0) return -EAI_NONAME;
+
+    char *canon = NULL;
+    if (h.ai_flags & AI_CANONNAME) {
+        canon = strdup(name);
+        if (!canon) return -EAI_MEMORY;
+    }
+    struct addrinfo *head = NULL, **tail = &head;
+    int first = 1;
+    for (int i = 0; i < n4; i++) {
+        struct addrinfo *ai = fk_mkaddr(AF_INET, ans.v4[i], port, socktype, proto, first ? canon : NULL);
+        if (!ai) { freeaddrinfo(head); return -EAI_MEMORY; }
+        first = 0;
+        *tail = ai; tail = &ai->ai_next;
+    }
+    for (int i = 0; i < n6; i++) {
+        struct addrinfo *ai = fk_mkaddr(AF_INET6, ans.v6[i], port, socktype, proto, first ? canon : NULL);
+        if (!ai) { freeaddrinfo(head); return -EAI_MEMORY; }
+        first = 0;
+        *tail = ai; tail = &ai->ai_next;
+    }
+    *res = head;
+    return 0;
+}
+
+void freeaddrinfo(struct addrinfo *res) {
+    fk_free_chain(res);
+}
+
+/* hostent klasik (A untuk gethostbyname, A/AAAA sesuai family utk _2);
+ * memakai storage statis seperti libc (hasil tak perlu di-free). */
+static struct hostent *fk_hostent_of(const char *name, const struct fk_dns_ans *ans, int family) {
+    int alen = family == AF_INET ? 4 : 16;
+    int n = family == AF_INET ? ans->n4 : ans->n6;
+    if (n == 0) { h_errno = HOST_NOT_FOUND; return NULL; }
+    size_t need = sizeof(struct hostent) + strlen(name) + 1 + sizeof(char *)   /* aliases[1] */
+                + (size_t)(n + 1) * sizeof(char *) + (size_t)n * (size_t)alen;
+    static char *b = NULL;
+    static size_t bcap = 0;
+    if (need > bcap) {
+        char *nb = realloc(b, need);
+        if (!nb) { h_errno = NO_RECOVERY; return NULL; }
+        b = nb; bcap = need;
+    }
+    char *p = b;
+    struct hostent *he = (struct hostent *)p; p += sizeof *he;
+    he->h_name = p; memcpy(p, name, strlen(name) + 1); p += strlen(name) + 1;
+    he->h_aliases = (char **)p;
+    *(char **)p = NULL; p += sizeof(char *);
+    he->h_addr_list = (char **)p; p += (size_t)(n + 1) * sizeof(char *);
+    for (int i = 0; i < n; i++) {
+        he->h_addr_list[i] = p;
+        memcpy(p, family == AF_INET ? (void *)ans->v4[i] : (void *)ans->v6[i], (size_t)alen);
+        p += alen;
+    }
+    he->h_addr_list[n] = NULL;
+    he->h_addrtype = family;
+    he->h_length = alen;
+    return he;
+}
+
+struct hostent *gethostbyname2(const char *name, int family) {
+    if (!name || (family != AF_INET && family != AF_INET6)) { h_errno = NO_RECOVERY; return NULL; }
+    struct fk_dns_ans ans = {0};
+    fk_hosts_lookup(name, &ans);
+    int want_v4 = family == AF_INET && ans.n4 == 0;
+    int want_v6 = family == AF_INET6 && ans.n6 == 0;
+    if (want_v4 || want_v6) {
+        struct sockaddr_in ns[8];
+        int tmo = 2000, att = 3;
+        int nns = fk_load_resolv(ns, 8, &tmo, &att);
+        if (nns == 0) {
+            ns[0].sin_family = AF_INET; ns[0].sin_port = htons(53);
+            inet_pton(AF_INET, "1.1.1.1", &ns[0].sin_addr);
+            ns[1] = ns[0]; inet_pton(AF_INET, "8.8.8.8", &ns[1].sin_addr);
+            nns = 2;
+        }
+        int qtype = family == AF_INET ? 1 : 28;
+        fk_dns_query(name, qtype, ns, nns, tmo, att, &ans);
+    }
+    return fk_hostent_of(name, &ans, family);
+}
+
+struct hostent *gethostbyname(const char *name) {
+    return gethostbyname2(name, AF_INET);
+}
 
 /* ------------------------------------------------------------------ */
 static void fk_init(void) __attribute__((constructor));

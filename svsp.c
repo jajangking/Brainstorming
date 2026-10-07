@@ -646,14 +646,14 @@ static void handle(int listener, const struct seccomp_notif *req) {
                          (int)a[3]); break;
 #endif
 #ifdef SYS_chown
-        case SYS_chown:   rc = chown(pout, (uid_t)a[1], (gid_t)a[2]); break;
+        case SYS_chown:   rc = 0; break;   /* fakeroot: chown selalu EPERM tanpa root
+                                              -> berpura-pura sukses (wadah single-user) */
 #endif
 #ifdef SYS_lchown
-        case SYS_lchown:  rc = lchown(pout, (uid_t)a[1], (gid_t)a[2]); break;
+        case SYS_lchown:  rc = 0; break;
 #endif
         case SYS_fchownat:
-            rc = fchownat(AT_FDCWD, pout, (uid_t)a[2], (gid_t)a[3],
-                          (int)a[4]); break;
+            rc = 0; break;
 #ifdef SYS_truncate
         case SYS_truncate: rc = truncate(pout, (off_t)a[1]); break;
 #endif

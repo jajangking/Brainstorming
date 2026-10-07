@@ -843,3 +843,63 @@ Fix:
 
 Hasil: `localhost:~$ ` di awal, `localhost:/etc$` di luar home. Verifikasi via
 PTY (`script`) + baterai V1–V4 + marker — semua hijau.
+
+## 15. ✅ SOLVED — DNS "transient error" (EAI_AGAIN 5s) + internet penuh di wadah
+
+Keluhan user: "kok gbsa akses internet DNS transient error". Akar: **libc musl
+wadah hanya punya 6 JUMP_SLOT (keluarga malloc) di ld-musl** — panggilan internal
+libc (resolver buka `/etc/resolv.conf`, `/etc/hosts`) direct-bound → LD_PRELOAD
+shim TIDAK bisa interpose → `open` host tak ada file wadahnya → fallback
+127.0.0.1 → timeout 5s → EAI_AGAIN.
+
+Fix (blok §3 resolver di libfakeroot.c):
+- Shim mengekspor resolver sendiri: `getaddrinfo` / `gethostbyname` /
+  `gethostbyname2` / `freeaddrinfo` — baca resolv.conf via base-prefix,
+  UDP paralel gaya `__res_msend`, IPv4 dulu.
+- `bootstrap.sh`: `setup_dns()` tulis `resolv.conf` wadah = 4 NS
+  (1.1.1.1 / 1.0.0.1 / 8.8.8.8 / 8.8.4.4) + `options timeout:2 attempts:3`
+  (sebelumnya masih `192.0.2.1`!). Pin `/etc/hosts` stale
+  `140.248.130.132 dl-cdn.alpinelinux.org` DIHAPUS (DNS reliable, pin tak perlu).
+
+Verifikasi: `dg` (statis) 0.01s; `dg-dyn2` (dinamis) example.com rc=0 0.03s
+IPv4-first, NXDOMAIN 0.01s; `ping example.com` 0% loss; `wget` nama rc=0;
+`apk update` → "OK: 28554 distinct packages available".
+
+## 16. ✅ SOLVED — apk-tools 3.0.8: O_TMPFILE + trigger script + chown
+
+- **O_TMPFILE**: apk tulis DB via `openat(...,O_RDWR|O_TMPFILE)` lalu publish
+  `linkat("/proc/self/fd/N",...)` → GAGAL di Android (EACCES/ENOENT) → DB
+  `installed` tak pernah ter-link. Shim mask `O_TMPFILE` (`FK_FLAGS` di
+  open/open64/openat/openat64) → apk fallback nama-temp `installed.tmp` +
+  `renameat` relatif (jalan dalam base). `apk add` → "OK".
+- **musl mkstemp/mkdtemp/tmpfile direct-bound** → tambah interposer keluarga
+  mkstemp/mkostemp/mkstemps/mkostemps/mkdtemp/creat + tmpfile (di $BASE/tmp).
+- **Shebang script exec**: kernel/musl-loader resolve `#!/bin/sh` di HOST →
+  "CANNOT LINK EXECUTABLE /bin/sh". Dua lapis fix:
+  (a) `fake-run`: parse `#!` + arg shebang → exec INTERP dari dalam base
+      (loader+interp+script), jalur svsp & ldpreload.
+  (b) shim `fk_try_shebang_exec`: utk exec child (mis. `sh -c './x.sh'`).
+- **Env-merge** (`fk_ensure_wadah_env`): apk scrub env script (hanya
+  APK_SCRIPT/APK_PACKAGE) → anak trigger tanpa LD_PRELOAD/PATH → rusak. Bila
+  envp tak membawa FAKE_BASE → gabung `environ` induk (kunci envp menang).
+- **chown→0** (shim + svsp): `apk_fsdir_update_perms` fchownat → EPERM tanpa
+  root → `num_dir_update_errors`. Fakeroot-style: pretend success (wadah
+  single-user). Builtin `busybox --install -s` trigger kini tereksekusi.
+
+## 17. ⚠️ BUG AKTIF — lanjut sesi berikutnya
+
+1. **`apk add/del` selalu "1 error" (rc=1) SILENT** — tanpa baris ERROR, tanpa
+   pesan "failed to write database". Muncul di SETIAP transaksi tulis DB
+   (juga `--no-scripts`, `--no-chown`). `apk update` & baca = bersih. Dugaan
+   kuat: `errors += r` per-change / `num_dir_update_errors` / `run_triggers`
+   via jalur yang TIDAK mencetak apa pun. Replika manual trigger busybox
+   persis anak apk (`env -i APK_SCRIPT=trigger APK_PACKAGE=busybox <trigger>
+   /bin`) → `rc=127 /bin/busybox: not found` → env-merge diduga BELUM bekerja
+   di jalur busybox env→script (debug: apakah execve interposer kena).
+2. **svsp path: DB write EACCES** — `fake-run --svsp apk add` →
+   "failed to write database: Permission denied". Mask O_TMPFILE hanya di
+   SHIM; jalur svsp (tanpa shim) harus mask O_TMPFILE di level openat (svsp.c).
+3. **Verifikasi device-2**: `git pull && ./install.sh`; pastikan resolv.conf
+   wadah 4NS+options via setup_dns().
+4. Bersihkan artifact uji: `$BASE/tmp/*.apk`, hello scripts, dg/dg-dyn2
+   (dg/dg-dyn2 tetap di wadah utk alat uji DNS).
