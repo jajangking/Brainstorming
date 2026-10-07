@@ -25,6 +25,8 @@ FR="$(command -v fake-run || echo "$SELF_DIR/fake-run")"
 DOC="$(command -v apk-doctor || echo "$SELF_DIR/apk-doctor")"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
+TMPF="$(mktemp "${TMPDIR:-$PREFIX/tmp}/.doctor.XXXXXX" 2>/dev/null || echo "$BASE/tmp/.doctor-pre.$$")"
+
 FAILS=0
 pass() { printf '[PASS] %s\n' "$1"; }
 fail() { printf '[FAIL] %s — %s\n' "$1" "$2"; FAILS=$((FAILS + 1)); }
@@ -55,10 +57,10 @@ else
 fi
 
 # --- 3. apk-doctor ----------------------------------------------------------
-if bash "$DOC" --base="$BASE" >/tmp/.doctor-pre.$$ 2>&1; then
+if bash "$DOC" --base="$BASE" >"$TMPF" 2>&1; then
     pass "apk-doctor: DB bersih (tanpa flag f/s)"
 else
-    fail "apk-doctor: ada flag f/s basi" "$(grep -m3 '  ' /tmp/.doctor-pre.$$ 2>/dev/null | tr '\n' ';')"
+    fail "apk-doctor: ada flag f/s basi" "$(grep -m3 '  ' "$TMPF" 2>/dev/null | tr '\n' ';')"
 fi
 
 if [ "$MODE" = diag ]; then
@@ -91,6 +93,10 @@ OUT=$(bash "$FR" apk add busybox 2>&1); RC=$?   # paket dengan trigger
 chk "shim: apk add busybox (trigger) rc=0" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC out=$(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
 
 # --- 6. jalur SVSP (alternatif) ----------------------------------------------
+# device-feedback ronde 3 butir 2b: tanpa purge, step ini no-op (paket sudah
+# terpasang oleh step shim) -> kriteria svsp vakum. Purge dulu agar nyata.
+info "purge $PKG agar transaksi svsp nyata ..."
+bash "$FR" apk del --no-scripts "$PKG" >/dev/null 2>&1
 info "svsp: apk add --no-cache $PKG ..."
 OUT=$(bash "$FR" --svsp apk add --no-cache "$PKG" 2>&1); RC=$?
 chk "svsp: apk add $PKG rc=0" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC out=$(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"
@@ -128,7 +134,7 @@ else
     info "akhir: ada flag f/s baru tertulis selama test — dibersihkan:"
     bash "$DOC" --base="$BASE" --clear-broken >/dev/null 2>&1
 fi
-rm -f /tmp/.doctor-pre.$$
+rm -f "$TMPF"
 
 echo "== RINGKASAN: $FAILS FAIL =="
 exit "$FAILS"

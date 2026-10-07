@@ -157,9 +157,14 @@ else
 fi
 
 # Isolation test
+# Sejak §20.2 /system passthrough (host-sh wrapper svsp + konsistensi shim):
+# metadata /system terlihat (stat OK) tapi ISI tetap tak terbaca tanpa izin
+# Android -> EACCES sama benarnya dengan ENOENT utk tujuan isolasi.
 ISO_RESULT=$(env -u LD_PRELOAD "$FR" --base="$BASE" cat /system/build.prop 2>&1 || true)
 if echo "$ISO_RESULT" | grep -i "enoent\|no such" >/dev/null; then
     log "Isolasi: /system/build.prop → ENOENT (benar!)"
+elif echo "$ISO_RESULT" | grep -i "permission denied\|eacces" >/dev/null; then
+    log "Isolasi: /system/build.prop → EACCES (benar, passthrough §20.2)"
 else
     warn "Isolasi: hasil tidak terduga: $ISO_RESULT"
 fi

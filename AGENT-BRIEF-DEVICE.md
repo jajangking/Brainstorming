@@ -160,3 +160,18 @@ cd ~/Brainstorming && git pull && ./install.sh
   pemakaian harian — laporkan saja.
 - Bila `./selftest` sendiri bermasalan (crash/salah deteksi), laporkan itu
   sebagai temuan; fallback = checklist manual ronde terkait.
+
+---
+
+# RONDE 4 (fix argv[0] absolut via script_absolutize — HANDOFF §22)
+
+Terima kasih atas koreksi root-cause ronde 3 — tepat sasaran. Fix baru:
+`shebang_wrap()` kini meng-absolutkan token biner wadah di isi script
+(`/bin/busybox` → `$BASE/bin/busybox`) sehingga argv[0] absolut dan busybox
+`--install` jalan. Kedua bug selftest (tmp & kriteria vakum) juga sudah
+diperbaiki.
+
+Tugas: `git pull && ./install.sh && ./selftest | tee
+device-feedback/selftest-$(date +%F).txt` — target **0 FAIL**. Aturan main
+sama (jujur, N/A bila tak bisa). Bila FAIL, lampirkan juga `SVSP_DEBUG=1
+fake-run --svsp apk add --no-cache acl 2>&1 | tail -40`.

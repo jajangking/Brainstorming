@@ -240,6 +240,118 @@ static int host_pass_prefix(const char *p) {
     return 0;
 }
 
+/* Rewrite token path-absolut wadah yg menunjuk FILE REGULER eksekutable di
+ * base menjadi path base penuh (device-feedback ronde 3, KOREKSI §20.1):
+ * busybox Alpine me-readlink("/bin/busybox") -> selalu gagal (file reguler)
+ * -> fallback argv[0] -> argv[0] HARUS absolut. Buffer argv[0] dari exec
+ * "/bin/busybox" cuma 13 byte (rewrite host 60 byte tak muat -> fallback
+ * relatif -> busybox mati). Dengan menulis "$BASE/bin/busybox" langsung di
+ * ISI script, sh mengalokasikan buffer 60 byte -> rewrite pas -> argv[0]
+ * absolut. Syarat token: mulai '/', bukan prefix host, $BASE+token ada,
+ * S_ISREG, dan X_OK. (Token data dalam string berkutip ikut terganti bila
+ * kebetulan sama persis dgn path biner — langka; didokumentasikan.) */
+#define ABS_MAXTOK 64
+static char *script_absolutize(int sfd, size_t *outlen) {
+    size_t cap = 1u << 20, len = 0;
+    char *buf = malloc(cap + 1);
+    if (!buf) return NULL;
+    for (;;) {
+        ssize_t r = read(sfd, buf + len, cap - len);
+        if (r < 0) { free(buf); return NULL; }
+        if (r == 0) break;
+        len += (size_t)r;
+        if (len == cap) break;
+    }
+    buf[len] = '\0';
+
+    /* kumpulkan kandidat token */
+    static char toks[ABS_MAXTOK][1024];
+    size_t tlens[ABS_MAXTOK];
+    int nt = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] != '/') continue;
+        if (i > 0) {
+            char c = buf[i - 1];
+            /* hanya di awal kata: pemisah umum shell/script */
+            if (c != ' ' && c != '\t' && c != '\n' && c != ';' && c != '|' &&
+                c != '&' && c != '(' && c != '`' && c != '"' && c != '\'' &&
+                c != '<' && c != '>' && c != '$' && c != '=')
+                continue;
+        }
+        size_t j = i;
+        while (j < len && buf[j] != ' ' && buf[j] != '\t' && buf[j] != '\n' &&
+               buf[j] != ';' && buf[j] != '|' && buf[j] != '&' &&
+               buf[j] != ')' && buf[j] != '"' && buf[j] != '\'' &&
+               buf[j] != '`' && buf[j] != '<' && buf[j] != '>' &&
+               buf[j] != ':')
+            j++;
+        size_t tl = j - i;
+        if (tl == 0 || tl >= sizeof toks[0]) continue;
+        char cand[1024];
+        memcpy(cand, buf + i, tl); cand[tl] = '\0';
+        if (host_pass_prefix(cand)) continue;
+        if (strncmp(cand, base, baselen) == 0) continue;
+        char hp[4608];
+        snprintf(hp, sizeof hp, "%s%s", base, cand);
+        struct stat stt;
+        if (stat(hp, &stt) < 0 || !S_ISREG(stt.st_mode)) continue;
+        if (access(hp, X_OK) != 0) continue;
+        int dup = 0;
+        for (int k = 0; k < nt; k++)
+            if (tlens[k] == tl && memcmp(toks[k], cand, tl) == 0) { dup = 1; break; }
+        if (dup) continue;
+        if (nt >= ABS_MAXTOK) continue;
+        memcpy(toks[nt], cand, tl + 1);
+        tlens[nt] = tl;
+        nt++;
+    }
+    if (nt == 0) { *outlen = len; return buf; }
+
+    /* urutkan terpanjang dulu (hindari tabrakan prefiks saat ganti) */
+    for (int a = 0; a < nt; a++)
+        for (int b = a + 1; b < nt; b++)
+            if (tlens[b] > tlens[a]) {
+                char tc[1024]; memcpy(tc, toks[a], tlens[a] + 1);
+                memcpy(toks[a], toks[b], tlens[b] + 1);
+                memcpy(toks[b], tc, tlens[a] + 1);
+                size_t tt = tlens[a]; tlens[a] = tlens[b]; tlens[b] = tt;
+            }
+
+    /* hitung ukuran hasil */
+    size_t newlen = 0, i = 0;
+    while (i < len) {
+        int hit = -1;
+        for (int k = 0; k < nt; k++)
+            if (i + tlens[k] <= len && memcmp(buf + i, toks[k], tlens[k]) == 0) {
+                hit = k; break;
+            }
+        if (hit >= 0) { newlen += baselen + tlens[hit]; i += tlens[hit]; }
+        else { newlen++; i++; }
+    }
+    char *out = malloc(newlen + 1);
+    if (!out) { free(buf); return NULL; }
+    size_t o = 0; i = 0;
+    while (i < len) {
+        int hit = -1;
+        for (int k = 0; k < nt; k++)
+            if (i + tlens[k] <= len && memcmp(buf + i, toks[k], tlens[k]) == 0) {
+                hit = k; break;
+            }
+        if (hit >= 0) {
+            memcpy(out + o, base, baselen); o += baselen;
+            memcpy(out + o, toks[hit], tlens[hit]); o += tlens[hit];
+            i += tlens[hit];
+        } else {
+            out[o++] = buf[i++];
+        }
+    }
+    out[o] = '\0';
+    free(buf);
+    DBG("script_absolutize: %d token di-rewrite\n", nt);
+    *outlen = o;
+    return out;
+}
+
 static int shebang_wrap(const char *H) {
     int fd = open(H, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
@@ -272,30 +384,29 @@ static int shebang_wrap(const char *H) {
     else snprintf(loader, sizeof loader, "%s/lib/ld-musl-patched.so.1", base);
     int use_loader = (access(loader, X_OK) == 0);
 
-    /* isi asli -> <H>.orig-svsp (skali saja) */
+    /* isi asli -> <H>.orig-svsp (skali saja), dgn path biner wadah
+     * di-absolutkan ke base (lihat script_absolutize) */
     char origp[4608];
     snprintf(origp, sizeof origp, "%s.orig-svsp", H);
     if (access(origp, F_OK) != 0) {
         int s = open(H, O_RDONLY | O_CLOEXEC);
+        if (s < 0) return -1;
+        size_t clen = 0;
+        char *content = script_absolutize(s, &clen);
+        close(s);
+        if (!content) return -1;
         int d2 = open(origp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
                       st.st_mode & 0777);
-        if (s < 0 || d2 < 0) {
-            if (s >= 0) close(s);
-            if (d2 >= 0) { close(d2); unlink(origp); }
-            return -1;
+        if (d2 < 0) { free(content); return -1; }
+        int bad = 0;
+        ssize_t w = 0;
+        while (w < (ssize_t)clen) {
+            ssize_t k = write(d2, content + w, clen - (size_t)w);
+            if (k < 0) { bad = 1; break; }
+            w += k;
         }
-        char buf[8192]; ssize_t r; int bad = 0;
-        while ((r = read(s, buf, sizeof buf)) > 0) {
-            ssize_t w = 0;
-            while (w < r) {
-                ssize_t k = write(d2, buf + w, (size_t)(r - w));
-                if (k < 0) { bad = 1; break; }
-                w += k;
-            }
-            if (bad) break;
-        }
-        if (r < 0) bad = 1;
-        close(s); close(d2);
+        if (close(d2) < 0) bad = 1;
+        free(content);
         if (bad) { unlink(origp); return -1; }
     }
 

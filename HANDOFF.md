@@ -1275,3 +1275,74 @@ di-patch daripada musl, plus permukaan baru (dpkg lock, maintainer scripts).
 Yang pindah distro hanya menghapus bug khusus apk (O_TMPFILE publish, silent
 flag) — keduanya sudah diatasi (`SVSP_MASK_TMPFILE` + `apk-doctor`). Untuk
 kebutuhan tool harian murni, `pkg` bawaan Termux tetap paling realistis.
+
+## 22. Ronde 3: koreksi root-cause + fix `script_absolutize` (argv[0] absolut)
+
+Feedback: `device-feedback/ronde3.md` + 2× `selftest`. **Koreksi penting dari
+agent lokal atas §20.1** (diterima, bukti kuat):
+
+- busybox Alpine 1.37.0-r31 build ini membaca
+  `readlink(bb_busybox_exec_path)` dengan `bb_busybox_exec_path =
+  "/bin/busybox"` (bukan `/proc/self/exe` — `strings` & log SVSP_DEBUG
+  `nr=78 [/bin/busybox]` membuktikan). `/bin/busybox` wadah = **file
+  reguler** → readlink = EINVAL **selalu**, dengan/tanpa fix §20.2.
+- Yang menentukan = **fallback argv[0]**; di rantai wrapper argv[0] =
+  `bin/busybox` relatif (buffer 13 byte tak muat path host 60 byte) → mati.
+  Top-level `fake-run --svsp /bin/busybox --install -s` rc=0 (argv[0]
+  absolut) memperkuat bukti.
+- Fix §20.2 (/proc/self CONTINUE) tetap benar & bekerja, tapi untuk jalur
+  yang tak dipakai build ini.
+
+### 22.1 Fix ronde 4: `script_absolutize()` di `shebang_wrap()`
+
+Saat wrap, isi `.orig-svsp` di-rewrite: tiap token path-absolut wadah yang
+menunjuk **file reguler + X_OK** di `$BASE` diganti jadi path base penuh
+(`/bin/busybox` → `$BASE/bin/busybox`). Efeknya `sh` wadah mengalokasikan
+buffer sesuai panjang sumber (60 byte) → rewrite C_EXEC pas → **argv[0]
+absolut** → busybox `--install` (dan program lain yang peduli argv[0])
+jalan. Generik utk semua script, bukan cuma busybox. Batas: file ≤1 MB,
+≤64 token unik, terpanjang dulu; token prefix host & `$BASE/...` dilewati;
+stat mengikuti symlink (`$BASE/bin/sh`→busybox ikut cocok). Catatan jujur:
+string data dalam script yang kebetulan == path biner ikut terganti (langka).
+
+Verifikasi sandbox (repro persis kegagalan device):
+```
+trigger "#!/bin/busybox sh" + baris "/bin/busybox --install -s"
+  -> .orig-svsp berisi "$BASE/bin/busybox" (shebang & command)     OK
+  -> rantai wrapper -> sh -> busybox: argv[0] absolut, --install OK OK
+  -> idempoten (run ke-2)                                          OK
+  -> O_TMPFILE suite + fallback renameat + O_DIRECTORY murni       OK
+```
+
+### 22.2 Fix bug selftest (temuan 2a/2b agent lokal)
+
+- File sementara tak lagi hardcode `/tmp` (tak tertulis di Termux) →
+  `mktemp "${TMPDIR:-$PREFIX/tmp}/..."` fallback `$BASE/tmp`.
+- Kriteria svsp tak lagi vakum: `apk del --no-scripts $PKG` disisipkan
+  antara step shim dan svsp sehingga `--svsp apk add $PKG` transaksi nyata
+  (trigger jalan).
+
+### 22.3 Keputusan V4 `/system` (temuan 4)
+
+Passthrough `/system` (§20.2) **dipertahankan** (butuh utk host-sh wrapper
+svsp & konsistensi). Konsekuensi: metadata `/system/*` terlihat (stat OK),
+isi tetap terlindungi izin Android (cat EACCES utk file root). `install.sh`
+quick-test kini menerima ENOENT **atau** EACCES sebagai "terisolasi".
+Baris historis §8 V4 ("ENOENT") = keadaan pra-§20.2, tak perlu diubah.
+
+### 22.4 Dicatat apa adanya (tanpa aksi)
+
+- RC=139 (SIGSEGV) sekali di probe agent lokal, tak berulang di 4 percobaan;
+  tak cukup bukti menyebut bug svsp. Dipantau di ronde berikut.
+- busybox ash wadah tak mendukung `${PIPESTATUS[0]}` (bash-ism) — gunakan
+  `sh -c 'cmd; echo $?'` di script wadah.
+
+### 22.5 Checklist RONDE 4 = `./selftest` versi baru (sudah mencakup semua)
+
+```bash
+cd ~/Brainstorming && git pull && ./install.sh
+./selftest | tee device-feedback/selftest-$(date +%F).txt
+```
+Kriteria lulus: **0 FAIL** — khususnya `svsp: apk add $PKG rc=0` kini
+transaksi nyata. Bila masih ada FAIL, sertakan output penuh + `SVSP_DEBUG=1
+fake-run --svsp apk add --no-cache acl 2>&1 | tail -40`.
