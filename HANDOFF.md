@@ -485,6 +485,9 @@ di depan fake-run saat tes.
 
 ## 11. BUG AKTIF — FLAKE BOOT "not found" (handoff lengkap ke arena.ai)
 
+> **INI SUDAH SELESAI — root cause & fix ada di §12 (SOLVED).** §11 di bawah adalah jejak
+> investigasi saat handoff (status git di 11.1 sudah kedaluwarsa: `main` kini sudah push).
+>
 > **Ini pekerjaan TERBUKA paling penting.** Fungsi inti semua hijau (figlet Q, alpine-release
 > 3.24.2, claude 2.1.291, tput 80, bc 42, apk-tools 3.0.8-r0, `alpine -c echo halo-wadah`),
 > tapi boot wadah **sesekali** (0–25%, tergantung kondisi device) kehilangan LD_PRELOAD →
@@ -650,3 +653,94 @@ fake-run LD_PRELOAD_32=mark2 FAKE_MARK=mark1 --base="$R" /bin/sh -c 'env | sort'
 ```
 Syarat lingkungan: jalankan dari shell Termux biasa (bukan coba bereksperimen sambil
 dipanaskan device — laju flake sensitif kondisi termal). Pakai `timeout 20` kalau takut gantung.
+
+---
+
+## 12. ✅ SOLVED — AKAR MASALAH DITEMUKAN & DIPERBAIKI
+
+> **Flake boot "not found" = race SIGPIPE `readelf | grep -q` di `is_dynamic()` fake-run,
+> di bawah `set -o pipefail`, yang sesekali salah klasifikasi binary DINAMIS → statis →
+> MODE=svsp → boot lewat supervisor svsp → `svsp.c:722` men-strip trio LD_* → ash tanpa
+> shim.** Bukan env(1), bukan `-u`, bukan loader, bukan truncation. Semua bukti §11.3–11.7
+> yang dulu terlihat "strip tepat daftar `-u`" sebenarnya adalah `unsetenv` svsp.c — kebetulan
+> nama var yang sama. Bagian di bawah adalah rantai penemuan on-device (7 Okt 2026).
+
+### 12.1 Rantai penemuan (urutan eksperimen sesungguhnya)
+
+1. **Balasan arena `d011680`** (branch `arena/c7d6ccb0-brainstorming`) = implementasi E5:
+   hapus flag `-u` redundan dari kedua `exec env -i` + fix `od -vu1 → -t u1` + bersihkan
+   `env -u LD_PRELOAD` di `alpine`. → **DIVERIFIKASI EMPIRIS: TIDAK menyembuhkan**
+   (arena2 tanpa `-u`: 3/20; WIP dengan `-u`: 2/20 — selang-seling, kondisi sama).
+2. **E2** (hapus `cd "$HOME_BASE"`): juga tidak menyembuhkan (2/20 vs 1/20) → `cd` bukan pemicu.
+3. **E1** (`cd $R && env -i <daftar penuh + PWD> $R/bin/sh` TANPA fake-run): **0/40 bersih**
+   → pelaku WAJIB ada di dalam skrip fake-run, bukan di daftar env/CWD/PWD.
+4. **NDYN** (arena2 minus blok `if is_dynamic`): **0/24 lalu 0/60** vs arena2 asli 2/24 lalu
+   **8/60** (selang-seling) → **panggilan `is_dynamic` (subproses `readelf`) = pemicunya**.
+5. **TIMING** (ndyn + `sleep 0.05` di top / di posisi readelf): **0/30 dan 0/30** →
+   BUKAN soal delay/timing — soal subproses readelf itu sendiri.
+6. **FDIAG** (arena2 + log `MODE` + log kegagalan is_dynamic): 5/40 UNSET ↔ **5 DYNF ↔
+   5 MODE=svsp — korelasi 1:1 SEMPURNA** → saat is_dynamic gagal, MODE jadi `svsp`.
+7. **Pembacaan `svsp.c:722`**: `unsetenv("LD_PRELOAD"); unsetenv("LD_LIBRARY_PATH");
+   unsetenv("LD_PRELOAD_32");` — svsp **sengaja** men-strip trio itu sebelum `execv`
+   target (komentar: "Menutup celah LD_PRELOAD"). → persis pola env gagal sepanjang riset
+   (trio LD_* hilang, FAKE_MARK ada, sisanya utuh).
+8. **Senjata bukti pamungkas** (`set -o pipefail`):
+   - `readelf -l f | grep -q 'Requesting'`: **14/60 gagal (23%)** — persis laju flake!
+   - `readelf -l f | grep 'Requesting' >/dev/null`: **0/60** — deterministik.
+   → `grep -q` keluar begitu cocok → readelf kena **SIGPIPE (rc 141)** → di bawah pipefail
+   status pipeline = 141 → `is_dynamic` return false → MODE=svsp. Bila readelf menulis
+   output lebih cepat dari penutupan pipe, lolos (rc 0) → MODE=ldpreload.
+
+### 12.2 Mengapa semua gejala lama cocok
+
+| Gejala lama (§11) | Penjelasan sebenarnya |
+|---|---|
+| "Hilang persis trio daftar `-u` env(1)" | `unsetenv` satu-satu di svsp.c — nama var kebetulan sama; akhirnya FAKE_MARK (bukan LD_*) lolos |
+| "Flake butuh skrip fake-run" | hanya fake-run yang memanggil `readelf` (lewat `is_dynamic`) |
+| "env direct / bashmid / locus2 / E1 selalu bersih" | tidak ada `readelf` di rantainya |
+| "Laju bergeser 0–25% antar blok, sensitif termal" | race kecepatan readelf vs `grep -q`; beban/thermal menggeser peluang SIGPIPE |
+| "Balasan arena (hapus `-u`) tak menyembuhkan" | `-u` tidak pernah jadi mekanisme — strip datang dari svsp.c |
+| "Not found" | MODE=svsp → `svsp.c` strip LD_* → ash tanpa shim → tanpa rewrite path → binary luar base ENOENT |
+
+### 12.3 Fix (di `fake-run`, 1 baris efektif)
+
+```sh
+# SEBELUM (BUKAN ini):
+readelf -l "$f" 2>/dev/null | grep -q 'Requesting program interpreter'
+# SESUDAH (aman): grep biasa — tidak keluar lebih awal, readelf selesai normal, tanpa SIGPIPE
+readelf -l "$f" 2>/dev/null | grep 'Requesting program interpreter' >/dev/null
+```
+
+Catatan:
+- `fake-run` sekarang = basis arena `d011680` (od `-t u1` + tanpa `-u`) + fix di atas.
+- Cabang direct-exec/`interp_of` dari WIP lokal lama **TIDAK dipertahankan** — percobaan
+  itu menyelesaikan hantu; loader-as-main bukan masalah. fake-run jadi lebih sederhana.
+- `svsp.c` sengaja strip LD_* → **JANGAN ubah**, itu memang desain (proteksi celah preload
+  di jalur supervisor). Yang salah adalah klasifikasi dinamis/statis, bukan svsp-nya.
+- `alpine` tidak diubah di main ini (perubahan arena hanya kosmetik `env -u LD_PRELOAD`).
+
+### 12.4 Verifikasi empiris (on-device, sesudah fix)
+
+```
+flake probe 100×                  : 0/100  UNSET   (sebelumnya 8–14/60 ≈ 13–23%)
+marker test (4 var, 1×)           : 4/4    ADA     (trio LD_* kini hadir)
+alpine-release                    : 3.24.2 ✓
+tput cols                         : 80 ✓
+bc (stdin '6*7')                  : 42 ✓
+alpine -c echo halo-wadah         : halo-wadah ✓
+figlet Q (via sh -c, 6 baris art) : ✓ (figlet = binary standalone, BUKAN applet busybox)
+busybox figlet Q                  : "applet not found" = WAJAR (figlet tak ada di busybox)
+```
+
+Sampel besar selang-seling sesudah fix: probe 100× + regresi fungsi = semua hijau. Laju
+flake sebelumnya terukur 13–23% pada sesi yang sama (kondisi termal sebanding).
+
+### 12.5 Pelajaran / rekomendasi lanjutan
+
+1. **Pola** untuk masa depan: `grep -q` di pipeline ber-`set -o pipefail` = SIGPIPE race.
+   Ganti dengan `grep ... >/dev/null` atau `grep -q ... || true` bila status tak penting.
+   Audit seluruh repo: `grep -rn "grep -q" --include=*.sh` (fake-run/alpine/installer).
+2. Verifikasi balasan agent secara empiris sebelum menerima (aturan proyek; E5 terbukti mati).
+3. Status git saat commit ini: `main` berisi §11 (handoff) + §12 (SOLVED); branch arena
+   `d011680` punya versi fix E5 yang salah arah — bagian od-fix-nya sudah diadopsi, bagian
+   hapus `-u` tidak berbahaya dan ikut teradopsi. Tidak perlu sinkronisasi khusus.

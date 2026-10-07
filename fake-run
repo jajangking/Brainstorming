@@ -61,11 +61,15 @@ esac
 is_dynamic() {
     local f="$1"
     if command -v readelf >/dev/null 2>&1; then
-        readelf -l "$f" 2>/dev/null | grep -q 'Requesting program interpreter'
+        # JANGAN pakai grep -q di pipeline ber-set -o pipefail: grep -q keluar begitu
+        # cocok -> readelf kena SIGPIPE (rc 141) -> is_dynamic salah-klasifikasi
+        # dinamis->statis -> MODE=svsp -> boot tanpa shim -> "not found" (flake ~0-25%).
+        # grep biasa (tanpa -q) membaca semua input -> readelf selesai normal.
+        readelf -l "$f" 2>/dev/null | grep 'Requesting program interpreter' >/dev/null
         return $?
     fi
     # parse program-header ELF64 murni (tanpa dependensi)
-    local hdr=( $(od -An -vu1 -N64 "$f" 2>/dev/null) )
+    local hdr=( $(od -An -t u1 -N64 "$f" 2>/dev/null) )
     [ ${#hdr[@]} -ge 58 ] || return 1
     local phoff=0 phesz phnum i j t off
     for i in 32 33 34 35 36 37 38 39; do
@@ -75,7 +79,7 @@ is_dynamic() {
     phnum=$(( ${hdr[56]} + (${hdr[57]} << 8) ))
     for i in $(seq 0 $((phnum - 1))); do
         off=$((phoff + i * phesz))
-        local ph=( $(od -An -vu1 -j "$off" -N "$phesz" "$f" 2>/dev/null) )
+        local ph=( $(od -An -t u1 -j "$off" -N "$phesz" "$f" 2>/dev/null) )
         [ ${#ph[@]} -ge 4 ] || return 1
         t=$(( ${ph[0]} + (${ph[1]} << 8) + (${ph[2]} << 16) + (${ph[3]} << 24) ))
         [ "$t" -eq 3 ] && return 0      # PT_INTERP
@@ -99,7 +103,6 @@ if [ "$MODE" = svsp ]; then
     [ -n "$SVSP" ] || { echo "fake-run: svsp tak ada. Bangun dulu: clang -O2 -o svsp svsp.c"; exit 1; }
     [ -x "$SVSP" ] || { echo "fake-run: svsp tak dapat dieksekusi: $SVSP"; exit 1; }
     exec env -i \
-      -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
       FAKE_BASE="$HOME_BASE" \
       PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
       LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
@@ -117,7 +120,6 @@ fi
 [ -x "$LOADER" ] || { echo "fake-run: loader tak ada: $LOADER"; exit 1; }
 
 exec env -i \
-  -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
   LD_PRELOAD="$SHIM" \
   FAKE_BASE="$HOME_BASE" \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
