@@ -86,7 +86,7 @@ static int fk_is_abs(const char *p) { return p && p[0] == '/'; }
 #define NEXT(fn) \
     static __typeof__(&fn) next_##fn; \
     do { if (!next_##fn) next_##fn = dlsym(RTLD_NEXT, #fn); } while (0);
-#define CALL(fn, ...) (next_##fn ? next_##fn(__VA_ARGS__) : (errno = ENOSYS, -1))
+#define CALL(fn, ...) (next_##fn ? next_##fn(__VA_ARGS__) : (errno = ENOSYS, (__typeof__(next_##fn(__VA_ARGS__)))-1))
 
 /* ---- open family ---- */
 int open(const char *path, int flags, ...) {

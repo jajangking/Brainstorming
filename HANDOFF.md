@@ -805,3 +805,41 @@ build: ELF 64-bit statically linked, ~50 KB     ✓
 
 Instalasi ulang penuh `./install.sh` harus hijau; device yang tadinya menolak
 svsp bionic kini tak bisa menolak svsp statis (tanpa linker = tanpa penolakan).
+
+---
+
+# 14. Beres-beres UX: warning shim hilang + prompt shell pendek
+
+## 14.1 13 warning `-Wconditional-type-mismatch` libfakeroot.c → 0
+
+Penyebab: makro `CALL(fn, ...)` punya fallback `(errno = ENOSYS, -1)` yang
+bertipe `int`, dipakai oleh fungsi return-pointer (`fopen`, `opendir`,
+`realpath`, `getcwd`, …). Conditional `next ? hasil(fn) : int` → tipe mismatched.
+
+Fix (tipe-generik, tanpa ubah semantik):
+```c
+#define CALL(fn, ...) (next_##fn ? next_##fn(__VA_ARGS__) \
+                      : (errno = ENOSYS, (__typeof__(next_##fn(__VA_ARGS__)))-1))
+```
+`__typeof__(callsite)` = tipe return fungsi → fallback ikut tipe itu: `-1` untuk
+int/ssize_t, `NULL`-ish untuk pointer (jalur mati — hanya dipakai kalau dlsym
+gagal). Build kini `0 warnings`.
+
+## 14.2 Prompt shell interaktif `alpine` (dan fake-run) panjang
+
+Sebelum: `localhost:/data/data/com.termux/files/home/alpine-rootfs$ `
+— `\w` = path penuh karena cwd = `$BASE` dan `PWD` di-hardcode `$HOME_BASE`.
+
+Akar: `fake-run` hardcode `cd "$HOME_BASE"` + `PWD="$HOME_BASE"` di `env -i`;
+busybox ash mempercayai `PWD` env, jadi cd di wrapper tak mempan.
+
+Fix:
+- `fake-run`: dukung `FAKE_START` (opsional; dikosongkan = perilaku lama),
+  `PWD="$(pwd)"` di kedua `env -i` agar env PWD selalu = cwd nyata.
+- `alpine` (interaktif): `FAKE_START="$BASE/root"` → login shell mendarat di
+  `/root` wadah → `\w` = `~`.
+- Di luar /root, getcwd shim sudah rewrite `$BASE→/` → `cd /etc` tampil
+  `localhost:/etc$` (pendek juga).
+
+Hasil: `localhost:~$ ` di awal, `localhost:/etc$` di luar home. Verifikasi via
+PTY (`script`) + baterai V1–V4 + marker — semua hijau.

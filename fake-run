@@ -94,6 +94,11 @@ fi
 mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true
 
 cd "$HOME_BASE"
+# Opsional: mulai dari direktori lain (mis. /root wadah agar prompt pendek).
+# Default tanpa FAKE_START = $HOME_BASE (perilaku lama, tidak berubah).
+if [ -n "${FAKE_START:-}" ] && [ -d "$FAKE_START" ]; then
+    cd "$FAKE_START"
+fi
 
 if [ "$MODE" = svsp ]; then
     # ===== jalur supervisor USER_NOTIF (statis / --svsp) =====
@@ -108,7 +113,7 @@ if [ "$MODE" = svsp ]; then
       LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
       HOME="$HOME_BASE/root" \
       TMPDIR="$HOME_BASE/tmp" \
-      PWD="$HOME_BASE" \
+      PWD="$(pwd)" \
       USER=root LOGNAME=root SHELL=/bin/sh \
       TERM="${TERM:-xterm-256color}" \
       ${extra_env[@]+"${extra_env[@]}"} \
@@ -126,7 +131,7 @@ exec env -i \
   LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
   HOME="$HOME_BASE/root" \
   TMPDIR="$HOME_BASE/tmp" \
-  PWD="$HOME_BASE" \
+  PWD="$(pwd)" \
   USER=root LOGNAME=root SHELL=/bin/sh \
   TERM="${TERM:-xterm-256color}" \
   ${extra_env[@]+"${extra_env[@]}"} \

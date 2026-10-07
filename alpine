@@ -30,11 +30,13 @@ fi
 
 # Masuk shell atau jalankan command
 if [ $# -eq 0 ]; then
-    # Shell interaktif
+    # Shell interaktif. Mendarat di /root wadah (= $HOME) supaya prompt
+    # pendek: \w => "~" (bukan path penuh /data/data/.../alpine-rootfs).
+    [ -d "$BASE/root" ] || mkdir -p "$BASE/root"
     echo "Masuk Alpine 3.24.2 (fake-chroot, native speed)"
     echo "Ketik 'exit' untuk keluar"
     echo
-    exec env -u LD_PRELOAD "$FR" --base="$BASE" /bin/sh -l
+    exec env -u LD_PRELOAD FAKE_START="$BASE/root" "$FR" --base="$BASE" /bin/sh -l
 elif [ "$1" = "-c" ]; then
     # alpine -c "command" — jalankan command string di dalam wadah
     shift
