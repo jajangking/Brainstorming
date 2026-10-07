@@ -455,3 +455,25 @@ di depan fake-run saat tes.
     on-device** (satu-satunya limitasi yang tak bisa dipaksa).
   - Merge `c7d6ccb0-brainstorming` via `--no-ff` (`2b135d3`) + commit akhir penyelesaian
     (belum di-push saat dokumen ditulis).
+  - **Pintu masuk `alpine` + installer (arena `53f0c95`+`cfea6b9`, di-FF ke main):**
+    `alpine` = masuk shell interaktif wadah (pengganti proot-distro login), `install.sh`
+    satu-perintah, `uninstall.sh`. Review lalu dua perbaikan:
+  - **Fix `alpine` (`-c`):** branch `-c "cmd"` semula di-pass ke `fake-run <prog>` ("program
+    tak ada: -c") → kini `fake-run ... /bin/sh -c "..."`; program biasa tetap passthrough
+    langsung (resolusi PATH wadah oleh fake-run). Teruji: `alpine -c "echo; cat /etc/alpine-release"`,
+    interaktif via stdin, `alpine tree -L 1 /usr`, `alpine apk add --no-scripts --no-cache`.
+  - **Fix shim `libfakeroot.c` (exec anak ber-interp mentah) — TERPENTING:** dari shell
+    interaktif, binary hasil `apk add` segar (PT_INTERP mentah `/lib/ld-musl-aarch64.so.1`)
+    tidak bisa di-exec (kernel cari interp di host → ENOENT); binary terpatchelf (apk, tput,
+    claude) jalan. Fix: intercept `exec*` wrapper kini memeriksa ELF target — bila dinamis
+    ber-INTERP mentah → re-exec via `$BASE/lib/ld-musl-patched.so.1 host args...` (pola
+    persis jalur cepat fake-run). Terbukti: `bc` (`6*7`→42), `tree`, `figlet` jalan dari
+    dalam shell; `claude --version`→2.1.291; statik (gobukti/svsp) tak berubah; ebench
+    tak terpengaruh. Warning build lama (fopen-family) non-fatal, build `-nostdlib` eksak
+    bootstrap (`35440` byte).
+  - **Environment note (bukan bug):** DNS publik (1.1.1.1/8.8.8.8/dll.) sesekali di-drop
+    carrier → `apk` "DNS: transient error" (resolver apk-tools 3.0 punya sendiri, abaikan
+    `/etc/hosts`); `--no-cache` menjauhkan cache-write EPERM; `--no-scripts` wajib. Saat
+    window DNS baik, `apk add` jalan normal (tree, figlet, bc, tput, ncurses terpasang
+    hari ini). SIGSYS flaky sesekali (race startup vs seccomp Android, logcat `signal 31`)
+    pada jalur cepat — 5/5 sukses pada sampling, pre-existing.

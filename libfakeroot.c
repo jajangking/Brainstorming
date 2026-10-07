@@ -169,11 +169,87 @@ int faccessat(int dirfd, const char *p, int m, int fl) {
     return CALL(faccessat, dirfd, p, m, fl);
 }
 
+/* ---- loader re-exec (binary dinamis ber-interp mentah) ---- */
+static const char *fk_loader_path(void) {
+    static char lp[PATH_MAX];
+    if (!lp[0]) snprintf(lp, sizeof lp, "%s/lib/ld-musl-patched.so.1", fk_base);
+    return lp;
+}
+
+/* 1 jika path = ELF dinamis dengan PT_INTERP mentah (mis. /lib/ld-musl-aarch64.so.1):
+ * eksekusi langsung oleh kernel akan gagal (host /lib tidak ada) maka harus
+ * dijalankan lewat loader patched. 0 untuk statik/script/non-ELF/interp patched
+ * (path absolute /data/... yang host-resolvable, sudah aman dieksekusi polos). */
+static int fk_needs_loader(const char *path) {
+    if (strcmp(path, fk_loader_path()) == 0) return 0;          /* jangan rekursif */
+    NEXT(open);
+    int fd = CALL(open, path, O_RDONLY);
+    if (fd < 0) return 0;
+    unsigned char h[64];
+    ssize_t n = read(fd, h, 64);
+    if (n < 64 || h[0] != 0x7f || h[1] != 'E' || h[2] != 'L' || h[3] != 'F' || h[4] != 2) {
+        close(fd); return 0;                                    /* non-ELF / bukan ELF64 */
+    }
+    unsigned long phoff = 0;
+    for (int i = 0; i < 8; i++) phoff |= (unsigned long)h[32 + i] << (8 * i);
+    unsigned int phesz = h[54] | ((unsigned int)h[55] << 8);
+    unsigned int phnum = h[56] | ((unsigned int)h[57] << 8);
+    if (phesz < 56 || phnum == 0 || phnum > 64 || phesz > 128) { close(fd); return 0; }
+    unsigned char *ph = alloca((size_t)phesz * phnum);
+    n = pread(fd, ph, (size_t)phesz * phnum, (off_t)phoff);
+    if (n < (ssize_t)(phesz * phnum)) { close(fd); return 0; }
+    for (unsigned int i = 0; i < phnum; i++) {
+        unsigned char *e = ph + i * phesz;
+        unsigned long type = (unsigned long)e[0] | ((unsigned long)e[1] << 8) |
+                             ((unsigned long)e[2] << 16) | ((unsigned long)e[3] << 24);
+        if (type != 3) continue;                                /* PT_INTERP */
+        unsigned long offp = 0, sz = 0;
+        for (int k = 0; k < 8; k++) {
+            offp |= (unsigned long)e[8 + k] << (8 * k);
+            sz   |= (unsigned long)e[32 + k] << (8 * k);
+        }
+        if (sz == 0) break;
+        if (sz > PATH_MAX - 1) sz = PATH_MAX - 1;
+        char interp[PATH_MAX];
+        n = pread(fd, interp, sz, (off_t)offp);
+        close(fd);
+        if (n < 1) return 0;
+        interp[n] = '\0';
+        size_t bl = strlen(fk_base);
+        int patched = (strncmp(interp, fk_base, bl) == 0 &&
+                       (interp[bl] == '/' || interp[bl] == '\0'));
+        return patched ? 0 : 1;                                 /* interp resolvable? polos; selain itu loader */
+    }
+    close(fd);
+    return 0;                                                   /* statik / tanpa PT_INTERP */
+}
+
+/* exec satu path (sudah di-rewrite ke host) — lewat loader patched bila perlu,
+ * persis jalur cepat fake-run: loader host argv... (argv target dipertahankan). */
+static int fk_exec_one(const char *hostpath, char *const argv[], char *const envp[]) {
+    if (fk_needs_loader(hostpath)) {
+        const char *loader = fk_loader_path();
+        int n = 0;
+        while (argv && argv[n]) n++;
+        char **nav = malloc(((size_t)n + 3) * sizeof(char *));
+        if (!nav) { errno = ENOMEM; return -1; }
+        nav[0] = (char *)loader;
+        nav[1] = (char *)hostpath;
+        for (int k = 0; k < n; k++) nav[k + 2] = argv[k];
+        nav[n + 2] = NULL;
+        NEXT(execve);
+        int r = CALL(execve, loader, nav, envp);
+        free(nav);
+        return r;
+    }
+    NEXT(execve);
+    return CALL(execve, hostpath, argv, envp);
+}
+
 /* ---- exec family ---- */
 int execve(const char *p, char *const argv[], char *const envp[]) {
-    NEXT(execve);
-    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(execve, b, argv, envp); }
-    return CALL(execve, p, argv, envp);
+    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return fk_exec_one(b, argv, envp); }
+    return fk_exec_one(p, argv, envp);
 }
 int execl(const char *p, const char *a0, ...) {
     NEXT(execl);
@@ -193,16 +269,14 @@ int execl(const char *p, const char *a0, ...) {
     for (int i = 1; i <= argc; i++) argv[i] = va_arg(ap, char *);
     va_end(ap);
     argv[argc + 1] = NULL;
-    NEXT(execve);
-    long r = CALL(execve, b, argv, environ);
+    long r = fk_exec_one(b, argv, environ);
     if (b != p) free(b);
     return (int)r;
 }
 
 static int fk_execvp_search(const char *file, char *const argv[], char *const envp[], int use_path) {
-    NEXT(execve);
     if (!use_path || strchr(file, '/')) {
-        char b[PATH_MAX]; fk_rewrite(b, sizeof b, file); return CALL(execve, b, argv, envp);
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, file); return fk_exec_one(b, argv, envp);
     }
     const char *path = getenv("PATH");
     if (!path) path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -216,7 +290,7 @@ static int fk_execvp_search(const char *file, char *const argv[], char *const en
         if (!(dl == 1 && p[0] == '.')) strcpy(cand + dl + 1, file); else strcpy(cand + dl, file);
         char b[PATH_MAX]; fk_rewrite(b, sizeof b, cand);
         free(cand);
-        long r = CALL(execve, b, argv, envp);
+        long r = fk_exec_one(b, argv, envp);
         if (errno != ENOENT) return (int)r;
         if (!end) break;
         p = end + 1;
@@ -232,8 +306,7 @@ int execvpe(const char *file, char *const argv[], char *const envp[]) {
 }
 int execv(const char *p, char *const argv[]) {
     char b[PATH_MAX]; fk_rewrite(b, sizeof b, p);
-    NEXT(execve);
-    return CALL(execve, b, argv, environ);
+    return fk_exec_one(b, argv, environ);
 }
 
 /* ---- stdio ---- */
