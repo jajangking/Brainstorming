@@ -1,0 +1,88 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# apk-doctor — diagnosa & perbaikan database apk-tools untuk wadah alpine ini.
+#
+# Latar belakang (HANDOFF.md §18): apk-tools v3 menyimpan status "file rusak"
+# per paket di field `f:` pada $BASE/lib/apk/db/installed:
+#     f  = broken_files    (ekstrak/commit file gagal di masa lalu)
+#     s  = broken_script   (script pre/post-install gagal di masa lalu)
+#     x  = broken_xattr    (xattr tak bisa diset; tidak dihitung sbg error)
+#     S  = sha256 di-truncate 160 bit (format checksum baru; normal)
+# Flag `f`/`s` yang TERSISA dari kegagalan lama (sebelum perbaikan §17/§18)
+# membuat setiap `apk add/del` menambah "1 error" tanpa pesan apa pun
+# (commit.c: errors += old_pkg->broken_files || broken_script) dan rc=1.
+# Script ini melaporkan dan bisa membersihkan flag basi tersebut.
+#
+# Pemakaian:
+#   ./apk-doctor [--base=DIR]              # laporan saja (read-only)
+#   ./apk-doctor [--base=DIR] --clear-broken   # buang flag f/s basi
+#
+# Alternatif perbaikan lain: `apk fix --reinstall <paket>` (unduh ulang).
+
+set -u
+
+BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+CLEAR=0
+for a in "$@"; do
+    case "$a" in
+        --base=*) BASE="${a#--base=}" ;;
+        --clear-broken) CLEAR=1 ;;
+        -h|--help)
+            sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "apk-doctor: arg tak dikenal: $a" >&2; exit 2 ;;
+    esac
+done
+
+DB="$BASE/lib/apk/db/installed"
+if [ ! -f "$DB" ]; then
+    echo "apk-doctor: database tak ditemukan: $DB" >&2
+    echo "  (sudah bootstrap? jalankan ./bootstrap.sh dulu)" >&2
+    exit 2
+fi
+
+# --- laporan: paket dengan flag f/s -----------------------------------------
+# Cetak "P:<paket> f:<isi>" utk tiap field f: yang mengandung 'f' atau 's'.
+REPORT=$(awk '
+    /^P:/ { pkg = substr($0, 3) }
+    /^f:/ {
+        flags = substr($0, 3)
+        if (flags ~ /[fs]/) printf "%s\t%s\n", pkg, flags
+    }
+' "$DB")
+
+if [ -z "$REPORT" ]; then
+    echo "apk-doctor: bersih — tidak ada flag broken_files/broken_script di DB."
+    exit 0
+fi
+
+echo "apk-doctor: paket dgn flag 'f'(broken_files)/'s'(broken_script) basi:"
+printf '%s\n' "$REPORT" | while IFS=$'\t' read -r pkg flags; do
+    printf '  %-28s f:%s\n' "$pkg" "$flags"
+done
+echo
+echo "Flag ini sisa kegagalan lama; tiap apk add/del akan menghitungnya sbg"
+echo "'1 error' tanpa pesan. Alternatif: apk fix --reinstall <paket>."
+
+[ "$CLEAR" -eq 1 ] || exit 1
+
+# --- perbaikan: simpan hanya flag x/S, buang f/s ----------------------------
+BAK="$DB.bak-doctor.$$"
+cp -p "$DB" "$BAK" || { echo "apk-doctor: gagal backup $BAK" >&2; exit 1; }
+
+awk '
+    /^f:/ {
+        keep = ""
+        s = substr($0, 3)
+        for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c == "x" || c == "S") keep = keep c
+        }
+        if (keep != "") print "f:" keep
+        next
+    }
+    { print }
+' "$BAK" > "$DB.tmp.$$" || { rm -f "$DB.tmp.$$"; echo "apk-doctor: awk gagal; DB tak diubah" >&2; exit 1; }
+
+mv "$DB.tmp.$$" "$DB" || { echo "apk-doctor: mv gagal; DB tak diubah" >&2; exit 1; }
+echo "apk-doctor: flag f/s dibersihkan. Backup lama: $BAK"
+echo "Cek: fake-run apk add --simulate busybox   (harus bebas '1 error')"

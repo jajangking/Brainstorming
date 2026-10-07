@@ -888,6 +888,10 @@ IPv4-first, NXDOMAIN 0.01s; `ping example.com` 0% loss; `wget` nama rc=0;
 
 ## 17. ⚠️ BUG AKTIF — lanjut sesi berikutnya
 
+> **UPDATE §18:** butir 1 & 2 sudah di-root-cause dan diperbaiki di kode
+> (svsp.c, libfakeroot.c, apk-doctor). Verifikasi device masih wajib —
+> lihat checklist §18.5.
+
 1. **`apk add/del` selalu "1 error" (rc=1) SILENT** — tanpa baris ERROR, tanpa
    pesan "failed to write database". Muncul di SETIAP transaksi tulis DB
    (juga `--no-scripts`, `--no-chown`). `apk update` & baca = bersih. Dugaan
@@ -903,3 +907,178 @@ IPv4-first, NXDOMAIN 0.01s; `ping example.com` 0% loss; `wget` nama rc=0;
    wadah 4NS+options via setup_dns().
 4. Bersihkan artifact uji: `$BASE/tmp/*.apk`, hello scripts, dg/dg-dyn2
    (dg/dg-dyn2 tetap di wadah utk alat uji DNS).
+
+## 18. ✅ ROOT-CAUSE + FIX bug §17.1 & §17.2 (svsp O_TMPFILE, "1 error" silent, env-merge)
+
+Dikerjakan di branch `arena/a172be3f-brainstorming`. Semua analisis memakai
+sumber apk-tools v3.0.8 (`/home/user/scratch/apk38`, tag `v3.0.8`). Yang
+diverifikasi di sandbox x86_64 hanya logika (seccomp USER_NOTIF + preload);
+**belum** diverifikasi di device Android (sandbox ini tak punya toolchain
+musl/aarch64 maupun device).
+
+### 18.1 Bug §17.2 — svsp: "failed to write database: Permission denied"
+
+**Rantai syscall lengkap** (mengapa hanya jalur svsp yang kena; jalur shim
+LD_PRELOAD aman karena `FK_FLAGS` sudah mem-mask O_TMPFILE):
+
+1. `apk_db_write_layers` (`database.c:2242-2250`):
+   `ld->fd = openat(db->root_fd, layer, O_DIRECTORY|O_RDONLY|O_CLOEXEC)`
+   lalu `apk_ostream_to_file(ld->fd, "installed"|"triggers"|"scripts.tar.gz"|"world", 0644)`.
+2. `__apk_ostream_to_file` (`src/io.c`): karena `is_proc_fd_ok()` true
+   (`$BASE/proc` symlink ke `/proc`, dibuat `bootstrap.sh:152-168`), dipakai
+   `tmpfile=true` → `openat(ld->fd, ".", O_RDWR|O_TMPFILE|O_CLOEXEC, mode)`.
+3. Path `"."` RELATIF → svsp lama `changed==0` → jawab CONTINUE → **child**
+   membuka O_TMPFILE sungguhan (anon-inode).
+4. Publish di `fdo_close`: `linkat(AT_FDCWD, "/proc/self/fd/N", ld->fd,
+   "installed.tmp.<pid>", AT_SYMLINK_FOLLOW)` — juga relatif/passthrough →
+   butuh **CAP_DAC_READ_SEARCH** → selalu EACCES di Android →
+   `apk_ostream_cancel` → `apk_err("System state may be inconsistent: failed
+   to write database: %s")` (`database.c:2341-2344`).
+
+**Fix di `svsp.c`** (semua sudah di-commit):
+
+- `SVSP_MASK_TMPFILE(f)` — mask HANYA bila bit anon benar-benar set
+  (`(f & O_TMPFILE) == O_TMPFILE`, semantik kernel; O_TMPFILE mengandung bit
+  O_DIRECTORY sehingga masking tanpa syarat merusak open direktori biasa).
+- **Force supervisor** menangani `openat` ber-O_TMPFILE walau path tak
+  berubah (relatif "."). Dirfd child dipin via
+  `open("/proc/<pid>/fd/<dirfd>", O_PATH)` (`child_fd_ref`), lalu supervisor
+  mengeksekusi `openat(dirfd_pin, ".", masked_flags, mode)`.
+- Hasil masking = buka direktori dgn O_RDWR → **EISDIR** → apk jatuh ke
+  fallback nama-temp: `installed.tmp.<id>` + `renameat` RELATIF (relatif →
+  tetap CONTINUE → child kerjakan sendiri → jalan). Bila masking tak sengaja
+  sukses, fd ditutup dan dipaksa `-EISDIR` juga (deterministik).
+- `openat2`: `how.flags` ikut di-mask (jalur ini praktis mati di Android —
+  openat2 kena SIGSYS eksternal, HANDOFF §6.1 — tapi ditutup tetap).
+- **`proc_self_fix()`**: syscall yang DIEKSEKUSI SUPERVISOR melihat
+  `/proc/self` sebagai dirinya, bukan child. Diterjemahkan ke
+  `/proc/<pid-child>` utk C_OPEN/C_STAT/C_STATX/C_STATFS/C_READLINK/C_SIDE;
+  C_EXEC/C_CHDIR dikecualikan (child yang menjalankan → `/proc/self` benar).
+  Dipanggil SETELAH `cache_store` dan tidak pernah di-cache (kunci cache =
+  path asli; pid beda per notifikasi). `rewrite2()` dipakai utk path kedua
+  rename/link/linkat; target `symlink(at)` sengaja TIDAK (isi link bukan
+  path yang di-resolve sekarang).
+- **Bonus fix (bug laten fd-passing)**: buffer cmsg `sendmsg/recvmsg`
+  listener diperlebar ke `CMSG_SPACE(sizeof(int))` via union ter-align;
+  buffer lama `sizeof(struct cmsghdr)+int` memicu MSG_CTRUNC di glibc x86_64
+  (fd listener hilang → "tak dapat listener"). Di aarch64/musl kebetulan
+  pas, tapi bentuk lama tetap salah secara spesifikasi.
+
+**Verifikasi sandbox (x86_64, seccomp USER_NOTIF sungguhan)** — arsitektur
+filter di-swap ke x86 hanya utk test (repo tetap aarch64):
+
+```
+1. openat(dfd, ".", O_RDWR|O_TMPFILE|O_CLOEXEC, 0644) -> EISDIR   OK
+2. fallback installed.tmp + renameat relatif (CONTINUE)           OK
+3. open(O_RDONLY|O_DIRECTORY) murni tak ter-mask                  OK
+4. O_TMPFILE path absolut juga ter-mask                           OK
+5. readlink("/proc/self/exe") supervisor -> /proc/<pid>/exe       OK
+```
+
+### 18.2 Bug §17.1 — "1 error" silent + trigger rc=127
+
+Ada DUA penyebab independen yang saling menumpuk:
+
+**(a) Flag basi `f:`/`s:` yang dipersist di database** (sumber satu-satunya
+yang sepenuhnya SILENT setelah semua jalur lain dieleminasi):
+
+- `commit.c:484-485`: `r = change->old_pkg && (old_pkg->ipkg->broken_files
+  || broken_script); ... errors += r;` — dihitung tanpa pesan bila
+  `print_change()` (`commit.c:56-101`) return false (versi sama, bukan
+  reinstall, tag repo sama).
+- Flag itu field `f:` di DB: parse `database.c:1029-1030` (`f`=broken_files,
+  `s`=broken_script, `x`=broken_xattr, `S`=sha256-160), tulis
+  `database.c:1130-1141`, hanya reset saat reinstall nyata
+  (`database.c:3234-3235`). Kegagalan ekstraksi/script di era sebelum fix
+  §16 meninggalkan `f`/`s` → tiap transaksi berikutnya "1 error" selamanya.
+- Jalur lain yang dianggap tapi TIDAK silent (coret): write-config,
+  `num_dir_update_errors` (apk_warn), trigger/script failure (apk_err),
+  log redirection (`print.c:261-282` menulis ke console DAN log).
+
+**Obat**: script baru `./apk-doctor` (root repo):
+- tanpa arg → lapor paket ber-flag `f`/`s` (beserta `P:` pemiliknya);
+- `--clear-broken` → tulis ulang `installed`, field `f:` hanya menyimpan
+  `x`/`S` (baris dibuang bila kosong), backup `.bak-doctor.<pid>`;
+- alternatif resmi: `apk fix --reinstall <paket>`.
+
+**(b) env-merge kalah melawan `clearenv()`** (penyebab rc=127 replika
+trigger `env -i APK_SCRIPT=... <trigger> /bin`):
+
+- `fk_ensure_wadah_env` lama menggabungkan **`environ` LIVE**. busybox
+  `env -i` memanggil `clearenv()` → musl men-set `environ=NULL` → tak ada
+  yang bisa digabung → child tanpa LD_PRELOAD/PATH → 127 "not found".
+- Fix: **snapshot deep-copy `environ` di constructor** (`fk_snapshot_env`);
+  merge memakai `environ` live bila masih ada, jatuh ke snapshot. envp
+  tetap menang per-kunci; envp boleh NULL.
+- Celah interposer juga ditutup: ditambahkan `posix_spawn`,
+  `posix_spawnp` (musl menjalankan pointer `__execve` internal dari
+  clone(CLONE_VM|CLONE_VFORK) — TIDAK lewat PLT, tak bisa di-intercept dari
+  execve; loader dirangkai langsung di interposer), `fexecve`, `execveat`
+  (termasuk AT_EMPTY_PATH via procfd), `execle`, `execlp`.
+
+**Verifikasi sandbox (LD_PRELOAD x86_64)**:
+
+```
+1. open(O_RDONLY|O_DIRECTORY) tak ter-mask FK_FLAGS baru     OK
+2. O_TMPFILE -> EISDIR                                       OK
+3. clearenv() + execvp script shebang -> LD_PRELOAD &
+   FAKE_BASE tersuntik ulang dari snapshot (exit 0)          OK
+4. clearenv() + posix_spawn/p ("testprint printenv") ->
+   child melihat LD_PRELOAD & FAKE_BASE, rc=0                OK
+```
+
+### 18.3 Catatan desain yang JANGAN diubah
+
+- Mask O_TMPFILE harus kondisional `(f & O_TMPFILE) == O_TMPFILE` — masking
+  tanpa syarat ikut mencabut O_DIRECTORY (O_TMPFILE = __O_TMPFILE|O_DIRECTORY).
+- `proc_self_fix` tidak boleh untuk C_EXEC/C_CHDIR (child yang mengeksekusi;
+  `/proc/self` justru benar) dan tidak boleh masuk rewrite_cache.
+- Jangan mem-fake `unshare`/`mount`/`uid_map`: `context.c:74-82` otomatis
+  men-set APK_NO_CHROOT saat `--root=/` (jalur shim), dan `--usermode`
+  native apk (autodetect `st_uid != 0` di `database.c:2035-2044`) sudah
+  menonaktifkan chown/xattr/devices.
+
+### 18.4 Yang BELUM bisa diverifikasi di sandbox (jujur)
+
+- Build musl/aarch64 (`libfakeroot.so`, `svsp` statis) — tak ada toolchain
+  cross di sandbox; build tetap via perintah di HANDOFF §7/§13 di device.
+- Perilaku nyata apk 3.0.8 di Termux (trigger busybox, tulis DB, rename
+  atomik antar layer) — wajib uji device (checklist §18.5).
+- `apk-doctor` baru dites thd DB tiruan; DB asli punya field lebih lengkap
+  (parser hanya menyentuh baris `f:`/`P:` jadi aman, tapi konfirmasi di device).
+
+### 18.5 Checklist verifikasi device (belum dilakukan)
+
+```bash
+cd ~/Brainstorming && git pull   # branch arena/a172be3f-brainstorming
+./install.sh                     # rebuild shim+svsp sesuai resep §7/§13
+
+# A. Bersihkan flag basi peninggalan era pra-fix (bug 17.1a):
+./apk-doctor                     # lapor
+./apk-doctor --clear-broken      # bersihkan (backup otomatis)
+
+# B. Bebas "1 error" (bug 17.1):
+fake-run apk add --no-cache hello && echo RC=$?     # harus rc=0, tanpa "error"
+fake-run apk del hello && echo RC=$?                # rc=0
+fake-run apk add busybox                            # ulang utk paket ber-trigger
+
+# C. svsp DB write (bug 17.2):
+fake-run --svsp apk add --no-cache hello            # TANPA "failed to write database"
+SVSP_DEBUG=1 fake-run --svsp apk add --no-cache acl 2>&1 | grep -i tmpfile
+#   (terlihat "O_TMPFILE di-mask ... path=[.]")
+
+# D. Trigger script jalan dgn env minimal (17.1b):
+env -i APK_SCRIPT=trigger APK_PACKAGE=busybox \
+  fake-run $BASE/lib/apk/db/scripts.tar/busybox.post-install /bin
+#   → rc=0 (dulu 127)
+
+# E. Device-2 (sisa §17.3): git pull && ./install.sh; cek resolv.conf wadah
+grep -c nameserver $BASE/etc/resolv.conf            # harap 4 NS + options
+
+# F. Bersih-bersih (sisa §17.4): rm $BASE/tmp/*.apk, hello scripts, dg-dyn2
+```
+
+Jika A–D lulus tapi masih ada "1 error": jalankan
+`fake-run apk add --simulate -v <pkg>` dan `strace`-equivalent via
+`FK_DEBUG=1 fake-run apk add ...` lalu bandingkan field `f:` sebelum/sesudah
+dengan `./apk-doctor`.

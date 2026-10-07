@@ -46,6 +46,7 @@
 #include <linux/types.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +55,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/time.h>   /* utimes() — tanpa ini: implicit declaration */
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -152,6 +154,62 @@ static int rewrite(const char *in, char *out, size_t outsz) {
     }
     snprintf(out, outsz, "%s%s", base, in);
     return 1;
+}
+
+/* ---- O_TMPFILE (bug §17.2 HANDOFF: "failed to write database: EACCES") ----
+ * apk-tools v3 menulis DB lewat __apk_ostream_to_file() (src/io.c:1159-1170):
+ *   openat(atfd, ".", O_RDWR|O_TMPFILE|O_CLOEXEC, mode)
+ * lalu mem-publish anon-inode di fdo_close() (src/io.c:1080-1092):
+ *   linkat(AT_FDCWD, "/proc/self/fd/N", atfd, "installed.tmp.<pid>", AT_SYMLINK_FOLLOW)
+ * Publish itu butuh CAP_DAC_READ_SEARCH -> di Android selalu EACCES/EPERM ->
+ * apk_ostream_cancel() -> "failed to write database: Permission denied".
+ *
+ * Shim LD_PRELOAD sudah men-mask O_TMPFILE (FK_FLAGS) sehingga apk jatuh ke
+ * jalur nama-temp + renameat. svsp TIDAK, karena path-nya RELATIF (".") ->
+ * rewrite() mengembalikan changed=0 -> CONTINUE -> child yang membuka dengan
+ * flag O_TMPFILE utuh. Maka: (1) mask flag di sini, (2) paksa supervisor
+ * menanganinya walau path tidak berubah. openat(".", O_RDWR) -> EISDIR ->
+ * apk memakai "installed.tmp" + renameat (relatif -> CONTINUE -> jalan). */
+#ifdef O_TMPFILE
+#define SVSP_HAS_TMPFILE(f) (((f) & (__u64)O_TMPFILE) == (__u64)O_TMPFILE)
+#define SVSP_MASK_TMPFILE(f) ((f) & ~(__u64)O_TMPFILE)
+#else
+#define SVSP_HAS_TMPFILE(f) 0
+#define SVSP_MASK_TMPFILE(f) (f)
+#endif
+
+/* fd supervisor yang menunjuk fd milik CHILD (via /proc/<pid>/fd/N, O_PATH).
+ * Dibutuhkan saat supervisor harus mengeksekusi syscall ber-path RELATIF
+ * terhadap dirfd child (kasus O_TMPFILE di atas: dirfd = fd hasil openat
+ * apk, bukan AT_FDCWD). O_PATH sah dipakai sebagai dirfd openat(2). */
+static int child_fd_ref(pid_t pid, int fd) {
+    char p[64];
+    int n = snprintf(p, sizeof p, "/proc/%d/fd/%d", (int)pid, fd);
+    if (n < 0 || (size_t)n >= sizeof p) { errno = ENAMETOOLONG; return -1; }
+    return open(p, O_PATH | O_CLOEXEC);
+}
+
+/* Syscall yang DIEKSEKUSI SUPERVISOR sendiri melihat "/proc/self" sebagai
+ * dirinya sendiri, bukan child — salah untuk fstatat("/proc/self/exe"),
+ * open("/proc/self/fd/N"), linkat("/proc/self/fd/N"), dst. Ganti ke
+ * /proc/<pid-child>. Return 1 bila path diubah.
+ * PENTING: hasil ini JANGAN masuk rewrite_cache (kunci = path asli, pid
+ * berbeda antar notifikasi). Karena itu dipanggil SETELAH cache_store(). */
+static int proc_self_fix(char *p, size_t n, pid_t pid) {
+    if (strncmp(p, "/proc/self", 10) != 0) return 0;
+    if (p[10] != '\0' && p[10] != '/') return 0;
+    char tmp[4096];
+    int r = snprintf(tmp, sizeof tmp, "/proc/%d%s", (int)pid, p + 10);
+    if (r < 0 || (size_t)r >= sizeof tmp || (size_t)r >= n) return 0;
+    memcpy(p, tmp, (size_t)r + 1);
+    return 1;
+}
+
+/* rewrite path kedua (rename/link/symlink) + koreksi /proc/self. */
+static int rewrite2(const char *in, char *out, size_t outsz, pid_t pid) {
+    int changed = rewrite(in, out, outsz);
+    if (proc_self_fix(out, outsz, pid)) changed = 1;
+    return changed;
 }
 
 /* ------------------------------------------------------------------ */
@@ -410,8 +468,21 @@ static void handle(int listener, const struct seccomp_notif *req) {
         cache_store(pbuf, pout, changed);
     }
 
+    /* Dua alasan supervisor TETAP harus menangani syscall yang path-nya tidak
+     * berubah (selain itu CONTINUE = child menjalankan sendiri, paling murah):
+     *   (a) /proc/self/... — hanya benar di child. Supervisor harus memakai
+     *       /proc/<pid-child>. C_EXEC/C_CHDIR dikecualikan karena keduanya
+     *       memang di-CONTINUE (child yang exec/chdir → /proc/self tetap sah).
+     *   (b) open O_TMPFILE — flag hanya bisa di-mask di supervisor; path apk
+     *       relatif (".") sehingga changed=0 (lihat SVSP_HAS_TMPFILE). */
+    int forced = 0;
+    if (cls != C_EXEC && cls != C_CHDIR && proc_self_fix(pout, sizeof pout, pid))
+        forced = 1;
+    if (cls == C_OPEN && nr == SYS_openat && SVSP_HAS_TMPFILE(a[2]))
+        forced = 1;
+
     /* tidak berubah -> biarkan kernel menjalankannya di child */
-    if (!changed) {
+    if (!changed && !forced) {
         send_resp(listener, req->id, 0, 0, SECCOMP_USER_NOTIF_FLAG_CONTINUE);
         return;
     }
@@ -420,6 +491,27 @@ static void handle(int listener, const struct seccomp_notif *req) {
     switch (cls) {
     case C_OPEN: {
         int fd;
+        int atfd = AT_FDCWD, atfd_ref = -1;
+        __u64 oflags = (nr == SYS_openat) ? a[2] : 0;
+        int tmpfile_req = SVSP_HAS_TMPFILE(oflags);
+        oflags = SVSP_MASK_TMPFILE(oflags);
+
+        /* Path RELATIF yang harus dieksekusi supervisor (kasus O_TMPFILE):
+         * dirfd milik child tak berarti di sini — pin lewat /proc/<pid>/fd/N. */
+        if (tmpfile_req && nr == SYS_openat && pout[0] != '/' &&
+            (__s64)a[0] != AT_FDCWD) {
+            atfd_ref = child_fd_ref(pid, (int)a[0]);
+            if (atfd_ref < 0) {
+                DBG("O_TMPFILE: dirfd child %d tak bisa di-pin: %s\n",
+                    (int)a[0], strerror(errno));
+                send_resp(listener, req->id, 0, -EBADF, 0); break;
+            }
+            atfd = atfd_ref;
+        }
+        if (tmpfile_req)
+            DBG("O_TMPFILE di-mask nr=%ld path=[%s] flags=0x%llx\n",
+                nr, pout, (unsigned long long)a[2]);
+
 #ifdef SYS_openat2
         if (nr == SYS_openat2) {
             struct open_how how;
@@ -436,10 +528,27 @@ static void handle(int listener, const struct seccomp_notif *req) {
                 oo += chunk;
             }
             if (rbad) { send_resp(listener, req->id, 0, -EFAULT, 0); break; }
+            /* openat2: flag ada di how.flags (bukan a[2]). Mask di sini juga;
+             * catatan: openat2 di Android kena SIGSYS eksternal sebelum notif
+             * (HANDOFF §6.1), jadi jalur ini praktis tak terpakai. */
+            tmpfile_req = SVSP_HAS_TMPFILE(how.flags);
+            how.flags = SVSP_MASK_TMPFILE(how.flags);
             fd = syscall(SYS_openat2, AT_FDCWD, pout, &how, (size_t)a[3]);
         } else
 #endif
-            fd = openat(AT_FDCWD, pout, (int)a[2], (int)a[3]);
+            fd = openat(atfd, pout, (int)oflags, (int)a[3]);
+
+        if (atfd_ref >= 0) { close(atfd_ref); atfd_ref = -1; }
+
+        if (fd >= 0 && tmpfile_req) {
+            /* Masking mengubah "buat anon-file di dir X" menjadi "buka X".
+             * Bila kernel tetap memberi fd, JANGAN dikirim ke child: semantiknya
+             * beda (file bernama, bukan anon) dan publish linkat-nya tetap akan
+             * gagal di Android. Paksa EISDIR — persis hasil masking di shim —
+             * supaya pemakai (apk) jatuh ke jalur nama-temp + renameat. */
+            close(fd);
+            fd = -1; errno = EISDIR;
+        }
         if (fd < 0) { send_resp(listener, req->id, 0, -errno, 0); break; }
         struct seccomp_notif_addfd add = { 0 };
         add.id = req->id;
@@ -561,7 +670,7 @@ static void handle(int listener, const struct seccomp_notif *req) {
             if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
                 send_resp(listener, req->id, 0, -EFAULT, 0); return;
             }
-            rewrite(pbuf2, pout2, sizeof pout2);
+            rewrite2(pbuf2, pout2, sizeof pout2, pid);
             rc = rename(pout, pout2); break;
         }
 #endif
@@ -571,7 +680,7 @@ static void handle(int listener, const struct seccomp_notif *req) {
             if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
                 send_resp(listener, req->id, 0, -EFAULT, 0); return;
             }
-            rewrite(pbuf2, pout2, sizeof pout2);
+            rewrite2(pbuf2, pout2, sizeof pout2, pid);
             rc = renameat(AT_FDCWD, pout, AT_FDCWD, pout2); break;
         }
 #endif
@@ -581,7 +690,7 @@ static void handle(int listener, const struct seccomp_notif *req) {
             if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
                 send_resp(listener, req->id, 0, -EFAULT, 0); return;
             }
-            rewrite(pbuf2, pout2, sizeof pout2);
+            rewrite2(pbuf2, pout2, sizeof pout2, pid);
             rc = syscall(SYS_renameat2, AT_FDCWD, pout, AT_FDCWD, pout2,
                          (int)a[4]); break;
         }
@@ -592,7 +701,7 @@ static void handle(int listener, const struct seccomp_notif *req) {
             if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
                 send_resp(listener, req->id, 0, -EFAULT, 0); return;
             }
-            rewrite(pbuf2, pout2, sizeof pout2);
+            rewrite2(pbuf2, pout2, sizeof pout2, pid);
             rc = link(pout, pout2); break;
         }
 #endif
@@ -602,11 +711,15 @@ static void handle(int listener, const struct seccomp_notif *req) {
             if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
                 send_resp(listener, req->id, 0, -EFAULT, 0); return;
             }
-            rewrite(pbuf2, pout2, sizeof pout2);
+            rewrite2(pbuf2, pout2, sizeof pout2, pid);
             rc = linkat(AT_FDCWD, pout, AT_FDCWD, pout2, (int)a[4]); break;
         }
 #endif
 #ifdef SYS_symlink
+        /* CATATAN: pbuf2 di symlink/symlinkat adalah ISI TARGET link (string
+         * yang disimpan apa adanya), bukan path yang di-resolve sekarang —
+         * karena itu sengaja TIDAK lewat rewrite2()/proc_self_fix(): menulis
+         * "/proc/<pid>/..." ke dalam symlink akan basi begitu child mati. */
         case SYS_symlink: {
             char *t = (void *)(uintptr_t)a[0];
             if (read_string(pid, t, pbuf2, sizeof pbuf2 - 1) < 0) {
@@ -749,12 +862,14 @@ int main(int argc, char **argv) {
                                strerror(errno)); _exit(126); }
         int listener = (int)lfd;
 
-        struct { struct cmsghdr cm; int fd; } ctl = { 0 };
+        /* buffer cmsg HARUS selebar CMSG_SPACE (bukan cmsghdr+int polos —
+         * kurang padding alignment; di glibc fd hilang karena MSG_CTRUNC). */
+        union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } ctl = { 0 };
         struct msghdr mh = { 0 };
         struct iovec iov; char byte = 'L';
         iov.iov_base = &byte; iov.iov_len = 1;
         mh.msg_iov = &iov; mh.msg_iovlen = 1;
-        mh.msg_control = &ctl; mh.msg_controllen = sizeof ctl;
+        mh.msg_control = ctl.buf; mh.msg_controllen = sizeof ctl.buf;
         struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
         cm->cmsg_level = SOL_SOCKET; cm->cmsg_type = SCM_RIGHTS;
         cm->cmsg_len = CMSG_LEN(sizeof(int));
@@ -772,10 +887,10 @@ int main(int argc, char **argv) {
     close(sp[1]);
     int listener = -1;
     char byte; struct iovec iov = { &byte, 1 };
-    struct { struct cmsghdr cm; int fd; } ctl = { 0 };
+    union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } ctl = { 0 };
     struct msghdr mh = { 0 };
     mh.msg_iov = &iov; mh.msg_iovlen = 1;
-    mh.msg_control = &ctl; mh.msg_controllen = sizeof ctl;
+    mh.msg_control = ctl.buf; mh.msg_controllen = sizeof ctl.buf;
     if (recvmsg(sp[0], &mh, 0) < 0) { perror("recvmsg"); return 2; }
     struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
     if (cm && cm->cmsg_type == SCM_RIGHTS)

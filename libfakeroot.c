@@ -38,6 +38,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <signal.h>
+#include <spawn.h>
 #include <ucontext.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
@@ -96,10 +97,17 @@ static int fk_is_abs(const char *p) { return p && p[0] == '/'; }
 /* Android: men-publish anon O_TMPFILE lewat linkat("/proc/self/fd/N") GAGAL
  * (EACCES/ENOENT) -> apk-tools v3 (dan lain-lain) yang menulis via O_TMPFILE
  * mati di langkah publish. Mask flag O_TMPFILE -> openat(...,".",O_RDWR)
- * -> EISDIR -> pemakai jatuh ke fallback nama-temp + renameat (relatif, jalan). */
+ * -> EISDIR -> pemakai jatuh ke fallback nama-temp + renameat (relatif, jalan).
+ *
+ * PENTING: mask HANYA bila bit anon benar-benar set, uji persis semantik
+ * kernel ((flags & O_TMPFILE) == O_TMPFILE). O_TMPFILE = __O_TMPFILE |
+ * O_DIRECTORY; masking tanpa syarat menggerus bit O_DIRECTORY dari open
+ * biasa (open(dir, O_RDONLY|O_DIRECTORY) lalu sukses membuka NON-dir). */
 #ifdef O_TMPFILE
-#define FK_FLAGS(f) ((f) & ~O_TMPFILE)
+#define FK_HAS_TMPFILE(f) (((f) & O_TMPFILE) == O_TMPFILE)
+#define FK_FLAGS(f) (FK_HAS_TMPFILE(f) ? ((f) & ~O_TMPFILE) : (f))
 #else
+#define FK_HAS_TMPFILE(f) 0
 #define FK_FLAGS(f) (f)
 #endif
 
@@ -389,19 +397,45 @@ static int fk_env_has_key(char *const envp[], const char *key, size_t klen) {
         if (strncmp(envp[i], key, klen) == 0 && envp[i][klen] == '=') return 1;
     return 0;
 }
-static char **fk_ensure_wadah_env(char *const envp[]) {
-    if (!envp || fk_env_has_key(envp, "FAKE_BASE", 9)) return (char **)envp;
+
+/* Snapshot environ saat constructor. SUMBER MERGE HARUS INI, bukan environ
+ * live: busybox `env -i` memanggil clearenv() yang mengosongkan environ live
+ * (musl men-set environ=NULL). Dengan environ live, script trigger apk
+ * (yang di-exec dengan envp = PATH/APK_SCRIPT/APK_PACKAGE saja) jalan TANPA
+ * LD_PRELOAD/FAKE_BASE -> "not found" rc=127 (bug §17.1 HANDOFF). */
+static char **fk_env0;   /* deep copy, NULL-terminated */
+static void fk_snapshot_env(void) {
+    if (fk_env0) return;
     int ne = 0; while (environ && environ[ne]) ne++;
-    int np = 0; while (envp[np]) np++;
+    char **snap = malloc(((size_t)ne + 1) * sizeof(char *));
+    if (!snap) return;
+    int m = 0;
+    for (int i = 0; i < ne; i++) {
+        snap[m] = strdup(environ[i]);
+        if (!snap[m]) break;
+        m++;
+    }
+    snap[m] = NULL;
+    fk_env0 = snap;
+}
+
+static char **fk_ensure_wadah_env(char *const envp[]) {
+    if (envp && fk_env_has_key(envp, "FAKE_BASE", 9)) return (char **)envp;
+    /* sumber merge: environ live bila masih hidup, jatuh ke snapshot.
+     * entri envp menang atas sumber. */
+    char *const *src = (environ && environ[0]) ? (char *const *)environ
+                                               : (char *const *)fk_env0;
+    int ne = 0; while (src && src[ne]) ne++;
+    int np = 0; while (envp && envp[np]) np++;
     char **merged = malloc(((size_t)ne + np + 1) * sizeof(char *));
-    if (!merged) return (char **)envp;
+    if (!merged) return envp ? (char **)envp : (char **)src;
     int m = 0;
     for (int i = 0; i < np; i++) merged[m++] = envp[i];
     for (int j = 0; j < ne; j++) {
-        const char *kv = environ[j];
+        const char *kv = src[j];
         const char *eq = strchr(kv, '=');
         size_t kl = eq ? (size_t)(eq - kv) : strlen(kv);
-        if (!fk_env_has_key(envp, kv, kl)) merged[m++] = (char *)kv;
+        if (!envp || !fk_env_has_key(envp, kv, kl)) merged[m++] = (char *)kv;
     }
     merged[m] = NULL;
     return merged;
@@ -498,6 +532,157 @@ int execvpe(const char *file, char *const argv[], char *const envp[]) {
 int execv(const char *p, char *const argv[]) {
     char b[PATH_MAX]; fk_rewrite(b, sizeof b, p);
     return fk_exec_one(b, argv, environ);
+}
+
+/* ---- spawn/exec-via-fd (bug §17.1 HANDOFF) ----
+ * posix_spawn musl memanggil pointer __execve internal langsung dari
+ * clone(CLONE_VM|CLONE_VFORK) — TIDAK lewat PLT, jadi interposer execve
+ * kita tak pernah melihatnya. Maka posix_spawn(p) di-interpose langsung:
+ * path di-rewrite + loader dirangkai di sini. fexecve/execveat menutup
+ * varian exec lewat fd; execle/execlp menutup varian varargs yang masih
+ * bolong. */
+static void fk_host_path(char *out, size_t n, const char *p) {
+    if (fk_is_abs(p)) fk_rewrite(out, n, p);
+    else snprintf(out, n, "%s", p);
+}
+
+static int fk_spawn_common(pid_t *res, const char *hostpath,
+                           const posix_spawn_file_actions_t *fa,
+                           const posix_spawnattr_t *attr,
+                           char *const argv[], char *const envp[]) {
+    char **menv = fk_ensure_wadah_env(envp);
+    NEXT(posix_spawn);
+    if (fk_needs_loader(hostpath)) {
+        /* ELF dinamis wadah: rangkai "loader hostpath argv..." (sama dgn
+         * jalur cepat fake-run / fk_exec_one). */
+        int n = 0; while (argv && argv[n]) n++;
+        char **nav = malloc(((size_t)n + 2) * sizeof(char *));
+        if (!nav) return ENOMEM;
+        const char *loader = fk_loader_path();
+        nav[0] = (char *)loader;
+        nav[1] = (char *)hostpath;
+        for (int k = 1; k < n; k++) nav[k + 1] = argv[k];
+        nav[n + 1] = NULL;
+        int r = CALL(posix_spawn, res, loader, fa, attr, nav, menv);
+        int e = errno; free(nav); errno = e;
+        return r;
+    }
+    int r = CALL(posix_spawn, res, hostpath, fa, attr, argv, menv);
+    if (r == ENOENT) {
+        /* shebang dgn interpreter wadah (mis. #!/bin/sh): kernel host tak
+         * kenal pathnya -> ENOENT. Fallback: child menangani via
+         * fk_exec_one (paham shebang). attr/file_actions tidak diterapkan
+         * ulang di jalur fallback — memadai utk skenario wadah. */
+        pid_t pid = fork();
+        if (pid == 0) { fk_exec_one(hostpath, argv, envp); _exit(127); }
+        if (pid > 0) { if (res) *res = pid; return 0; }
+        return errno;
+    }
+    return r;
+}
+
+int posix_spawn(pid_t *res, const char *path,
+                const posix_spawn_file_actions_t *fa,
+                const posix_spawnattr_t *attr,
+                char *const argv[], char *const envp[]) {
+    char b[PATH_MAX]; fk_host_path(b, sizeof b, path);
+    return fk_spawn_common(res, b, fa, attr, argv, envp);
+}
+
+int posix_spawnp(pid_t *res, const char *file,
+                 const posix_spawn_file_actions_t *fa,
+                 const posix_spawnattr_t *attr,
+                 char *const argv[], char *const envp[]) {
+    char b[PATH_MAX];
+    if (strchr(file, '/')) { fk_host_path(b, sizeof b, file);
+                             return fk_spawn_common(res, b, fa, attr, argv, envp); }
+    const char *path = getenv("PATH");
+    if (!path) path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    const char *p = path;
+    for (;;) {
+        const char *end = strchr(p, ':');
+        size_t dl = end ? (size_t)(end - p) : strlen(p);
+        char cand[PATH_MAX];
+        if (dl == 0) snprintf(cand, sizeof cand, "%s", file);
+        else snprintf(cand, sizeof cand, "%.*s/%s", (int)dl, p, file);
+        fk_rewrite(b, sizeof b, cand);
+        if (access(b, X_OK) == 0)
+            return fk_spawn_common(res, b, fa, attr, argv, envp);
+        if (!end) break;
+        p = end + 1;
+    }
+    return ENOENT;
+}
+
+int fexecve(int fd, char *const argv[], char *const envp[]) {
+    /* fd hasil open() yang sudah di-shim = fd file HOST; exec via procfd
+     * mempertahankannya. "/proc/self/fd/N" di-rewrite jadi $BASE/proc/self/...
+     * tetapi $BASE/proc symlink ke /proc -> resolusi sama persis. */
+    char p[64];
+    snprintf(p, sizeof p, "/proc/self/fd/%d", fd);
+    return execve(p, argv, envp);
+}
+
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+int execveat(int dirfd, const char *path, char *const argv[],
+             char *const envp[], int flags) {
+    if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
+        char p[64];
+        snprintf(p, sizeof p, "/proc/self/fd/%d", dirfd);
+        return execve(p, argv, envp);
+    }
+    char host[PATH_MAX];
+    if (path && path[0] == '/') {
+        fk_rewrite(host, sizeof host, path);
+    } else if (dirfd == AT_FDCWD) {
+        snprintf(host, sizeof host, "%s", path ? path : "");
+    } else {
+        char pl[64], d[PATH_MAX];
+        snprintf(pl, sizeof pl, "/proc/self/fd/%d", dirfd);
+        ssize_t rl = readlink(pl, d, sizeof d - 1);
+        if (rl < 0) return -1;
+        d[rl] = '\0';
+        if (rl > 0 && d[rl - 1] == '/') d[rl - 1] = '\0';
+        snprintf(host, sizeof host, "%s/%s", d, path ? path : "");
+    }
+    return fk_exec_one(host, argv, envp);
+}
+
+int execle(const char *p, const char *a0, ...) {
+    va_list ap, ap2;
+    va_start(ap, a0);
+    va_copy(ap2, ap);
+    int argc = 0;
+    while (va_arg(ap2, const char *) != NULL) argc++;
+    va_end(ap2);
+    char **argv = alloca((size_t)(argc + 2) * sizeof(char *));
+    argv[0] = (char *)a0;
+    for (int i = 1; i <= argc; i++) argv[i] = va_arg(ap, char *);
+    char *const *envp = va_arg(ap, char *const *);
+    va_end(ap);
+    char *b;
+    if (fk_is_abs(p)) { b = malloc(PATH_MAX); fk_rewrite(b, PATH_MAX, p); }
+    else b = (char *)p;
+    long r = fk_exec_one(b, argv, envp);
+    if (b != p) free(b);
+    return (int)r;
+}
+
+int execlp(const char *p, const char *a0, ...) {
+    va_list ap, ap2;
+    va_start(ap, a0);
+    va_copy(ap2, ap);
+    int argc = 0;
+    while (va_arg(ap2, const char *) != NULL) argc++;
+    va_end(ap2);
+    char **argv = alloca((size_t)(argc + 2) * sizeof(char *));
+    argv[0] = (char *)a0;
+    for (int i = 1; i <= argc; i++) argv[i] = va_arg(ap, char *);
+    va_end(ap);
+    argv[argc + 1] = NULL;
+    return fk_execvp_search(p, argv, environ, 1);
 }
 
 /* ---- stdio ---- */
@@ -1185,6 +1370,10 @@ static void fk_init(void) __attribute__((constructor));
 static void fk_init(void) {
     fk_base = getenv("FAKE_BASE");
     if (!fk_base || !*fk_base) fk_base = "/data/data/com.termux/files/home/alpine-rootfs";
+
+    /* snapshot environ SEBELUM ada yang clearenv() (busybox `env -i`);
+     * dipakai fk_ensure_wadah_env saat environ live sudah kosong. */
+    fk_snapshot_env();
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
