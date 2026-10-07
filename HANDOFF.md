@@ -1082,3 +1082,91 @@ Jika A–D lulus tapi masih ada "1 error": jalankan
 `fake-run apk add --simulate -v <pkg>` dan `strace`-equivalent via
 `FK_DEBUG=1 fake-run apk add ...` lalu bandingkan field `f:` sebelum/sesudah
 dengan `./apk-doctor`.
+
+## 19. ✅ Hasil verifikasi device (feedback agent lokal 2026-10-07) + fix ronde 2
+
+Feedback lengkap: `device-feedback/2026-10-07.md` (device-1, Infinix X6855,
+Android 16, kernel 6.12, apk-tools 3.0.8, clang 21.1.8).
+
+### 19.1 Yang TERKONFIRMASI di device
+
+- **§18.2a terbukti rantai penuh**: DB awal bersih → satu trigger gagal di
+  jalur svsp menulis `f:s` → transaksi berikutnya "1 error" SILENT walau
+  `--no-scripts` → `apk-doctor --clear-broken` → transaksi bersih rc=0.
+- **§17.2 beres**: log SVSP_DEBUG menampilkan `O_TMPFILE di-mask path=[.]`;
+  TIDAK ada lagi "failed to write database" di seluruh sesi.
+- **§17.1 jalur shim beres**: `apk add/del` (paket pengganti `acl`, soalnya
+  `hello` tak ada di Alpine v3.24) rc=0 tanpa error; trigger busybox jalan.
+- `install.sh` + resep build §7/§13 akurat; resolv.conf wadah 4 NS + options.
+- svsp stabil utk paket besar (`ca-certificates openssl`, 2 detik, tanpa hang).
+
+### 19.2 Bug baru yang ditemukan agent lokal + fix ronde 2
+
+1. **Trigger svsp rc=127** (`* execve: No such file or directory`): kernel
+   host me-resolve `#!/bin/busybox sh` terhadap root host. Fix:
+   **shebang-in-container di svsp** (`shebang_wrap()` di svsp.c): saat C_EXEC
+   mengenai script wadah ber-interpreter absolut wadah, supervisor menulis
+   ulang file itu (child terblok saat notifikasi → bebas race) jadi wrapper
+   `#!/system/bin/sh` yang meng-exec interpreter wadah lewat loader musl
+   patched; isi asli dipindah ke `<file>.orig-svsp`; idempoten (marker);
+   pasangan unlink dibersihkan di C_SIDE + oleh `apk-doctor --clear-broken`.
+   Ini juga menutup kasus `ca-certificates` trigger (`CANNOT LINK /bin/sh`).
+   Override: `SVSP_HOST_SH` (default `/system/bin/sh`), `SVSP_LOADER`
+   (default `$BASE/lib/ld-musl-patched.so.1`; bila tak ada, exec langsung).
+   Catatan: execve path RELATIF yang tak berubah kini tetap masuk handler
+   (dulu CONTINUE langsung) tapi melewati write_mem — string `.rodata` aman.
+2. **`passthrough()` svsp diperluas**: `/system /apex /vendor /product
+   /linkerconfig /data` wajib passthrough — tanpa itu wrapper host-sh dan
+   linker bionic (buka `/system/lib64/...`) ikut ter-rewrite dan rusak.
+3. **Regresi `fake-run` SBARGS** (dari commit ce108b9):
+   `interp="$(shebang_parse ...)"` → subshell membuang array SBARGS → arg
+   shebang hilang ("applet not found"). Fix: hasil lewat `SHEBANG_INTERP`,
+   tanpa `$(...)`.
+4. **`fake-run` + `env -i`**: `set -u` mati karena `HOME`/`PREFIX` tak ada.
+   Fix: `: "${PREFIX:=/data/data/com.termux/files/usr}"`, `: "${HOME:=...}"`.
+   Plus pass-through `SVSP_DEBUG`/`FK_DEBUG` eksplisit menembus `env -i`
+   (tadi harus lewat argumen `fake-run --svsp SVSP_DEBUG=1 apk ...`).
+5. Koreksi resep §18.5 (B/C/D): paket contoh `hello` → **`acl`** (hello tak
+   ada di v3.24); debug via argumen, bukan prefix env; path trigger §18.5 D
+   keliru — file trigger hidup sementara di `$BASE/lib/apk/exec/<nama>`
+   saat eksekusi, bukan `lib/apk/db/scripts.tar/...`.
+6. Catatan kecil: lock apk bisa lengket (RC=99 EAGAIN, ulang saja); backup
+   `installed.bak-doctor.*` aman dihapus kapan pun.
+
+### 19.3 Verifikasi sandbox ronde 2 (x86_64; device = ronde berikutnya)
+
+```
+shebang wrap: execve relatif "lib/apk/exec/t.trigger" (#! /bin/busybox sh)
+  -> wrapper -> busybox sh t.trigger.orig-svsp /bin      argv utuh, rc=0
+wrapper idempoten (run ke-2 tanpa rewrite ulang)         OK
+unlink trigger -> .orig-svsp ikut terhapus               OK
+fake-run --svsp script shebang -> SBARGS utuh (argv[1]=sh) OK
+env -i tanpa HOME/PREFIX -> fake-run jalan (dulu unbound)  OK
+apk-doctor --clear-broken bersihkan *.orig-svsp yatim      OK
+```
+
+### 19.4 Checklist device RONDE 2 (agent lokal, lihat AGENT-BRIEF-DEVICE.md)
+
+```bash
+cd ~/Brainstorming && git pull            # branch arena/a172be3f-brainstorming
+./install.sh
+
+# 1. Trigger svsp kini harus rc=0 (inti fix §19.2.1):
+fake-run --svsp apk del --no-scripts attr acl busybox 2>/dev/null  # bila ada
+./apk-doctor --clear-broken              # pastikan mulai dari DB bersih
+fake-run --svsp apk add --no-cache acl; echo RC=$?      # HARUS rc=0
+fake-run --svsp apk add --no-cache ca-certificates openssl; echo RC=$?
+ls $BASE/lib/apk/exec/                   # harap kosong (trigger dibersihkan apk+svsp)
+
+# 2. "1 error" tidak kembali: transaksi lanjutan (dengan trigger!) rc=0:
+fake-run apk add busybox; echo RC=$?
+./apk-doctor                              # harap "bersih"
+
+# 3. Regresi fake-run:
+fake-run /bin/busybox sh -c 'echo SBARGS-ok'            # jalur biasa
+env -i APK_SCRIPT=trigger APK_PACKAGE=busybox bash fake-run --ldpreload \
+  $BASE/lib/apk/exec/<trigger> /bin 2>/dev/null || true  # hanya bila file ada
+
+# 4. Laporkan ke device-feedback/<tanggal>-r2.md: RC tiap langkah, isi
+#    lib/apk/exec, output ./apk-doctor, dan sisa pesan aneh apa pun.
+```

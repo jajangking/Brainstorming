@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+# Default utk resep `env -i ... fake-run ...` (set -u tak boleh mati karena
+# HOME/PREFIX tak ada — temuan device-feedback 2026-10-07).
+: "${PREFIX:=/data/data/com.termux/files/usr}"
+: "${HOME:=$PREFIX/home}"
+
 HOME_BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
 SHIM="${FAKE_SHIM:-$HOME/libfakeroot.so}"
 LOADER="${FAKE_LOADER:-$HOME/alpine-rootfs/lib/ld-musl-patched.so.1}"
@@ -61,10 +66,16 @@ esac
 # (tidak ada /bin/sh Android yang benar) -> "CANNOT LINK EXECUTABLE /bin/sh".
 # Parse interp + argumen shebang; fake-run mengeksekusi INTERP dari dalam base
 # dengan script sebagai argumen (persis semantik kernel).
+# REGRESI ce108b9 DIPERBAIKI: dulu `interp="$(shebang_parse ...)"` — subshell
+# `$(...)` membuat assignment SBARGS=() hilang di shell induk -> arg shebang
+# (mis. `sh` pada `#!/bin/busybox sh`) terbuang -> "applet not found".
+# Sekarang hasil lewat variabel global SHEBANG_INTERP, tanpa subshell.
 SBARGS=()
+SHEBANG_INTERP=""
 shebang_parse() {
     local f="$1" line
     SBARGS=()
+    SHEBANG_INTERP=""
     IFS= read -r line < "$f" 2>/dev/null || return 1
     case "$line" in
         '#!'*)
@@ -73,7 +84,7 @@ shebang_parse() {
             [ ${#toks[@]} -ge 1 ] || return 1
             [ "${toks[0]:0:1}" = "/" ] || return 1
             if [ ${#toks[@]} -gt 1 ]; then SBARGS=("${toks[@]:1}"); fi
-            printf '%s\n' "${toks[0]}"
+            SHEBANG_INTERP="${toks[0]}"
             return 0 ;;
     esac
     return 1
@@ -85,7 +96,8 @@ interp_host() {
         *)  printf '%s' "$1" ;;
     esac
 }
-interp="$(shebang_parse "$host")" || interp=""
+interp=""
+shebang_parse "$host" && interp="$SHEBANG_INTERP"
 [ -z "$interp" ] || { ih="$(interp_host "$interp")"; [ -e "$ih" ] || { echo "fake-run: interpreter tak ada: $interp"; exit 1; }; }
 
 # deteksi ELF dinamis: ada PT_INTERP? (readelf bila ada; fallback od portabel)
@@ -124,6 +136,13 @@ fi
 
 mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true
 
+# Debug flag diteruskan eksplisit: `env -i` di bawah membuang variabel shell,
+# jadi `SVSP_DEBUG=1 fake-run ...` tak pernah sampai (temuan device 2026-10-07).
+# Tetap bisa juga lewat argumen: `fake-run --svsp SVSP_DEBUG=1 apk ...`.
+dbg_env=()
+[ -n "${SVSP_DEBUG:-}" ] && dbg_env+=("SVSP_DEBUG=$SVSP_DEBUG")
+[ -n "${FK_DEBUG:-}" ] && dbg_env+=("FK_DEBUG=$FK_DEBUG")
+
 cd "$HOME_BASE"
 # Opsional: mulai dari direktori lain (mis. /root wadah agar prompt pendek).
 # Default tanpa FAKE_START = $HOME_BASE (perilaku lama, tidak berubah).
@@ -154,6 +173,7 @@ if [ "$MODE" = svsp ]; then
       USER=root LOGNAME=root SHELL=/bin/sh \
       TERM="${TERM:-xterm-256color}" \
       ${extra_env[@]+"${extra_env[@]}"} \
+      ${dbg_env[@]+"${dbg_env[@]}"} \
       "$SVSP" --base="$HOME_BASE" "${tgt[@]}" "$@"
 fi
 
@@ -179,4 +199,5 @@ exec env -i \
   USER=root LOGNAME=root SHELL=/bin/sh \
   TERM="${TERM:-xterm-256color}" \
   ${extra_env[@]+"${extra_env[@]}"} \
+  ${dbg_env[@]+"${dbg_env[@]}"} \
   "$LOADER" "${tgt[@]}" "$@"

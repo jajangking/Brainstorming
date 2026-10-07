@@ -139,10 +139,20 @@ static ssize_t read_string(pid_t pid, void *addr, char *buf, size_t max) {
 /* rewrite path                                                         */
 /* ------------------------------------------------------------------ */
 static int passthrough(const char *p) {
+    /* /system,/apex,/vendor,/product,/linkerconfig,/data: path HOST Android.
+     * Wajib passthrough agar wrapper shebang (#!/system/bin/sh) dan linker
+     * dinamis host (bionic membuka /system/lib64, /apex/...) tidak ikut
+     * ter-rewrite ke $BASE (device-feedback 2026-10-07). */
     return p[0] != '/'                    /* relatif: resolve di child  */
         || !strncmp(p, "/dev/", 5) || !strcmp(p, "/dev")
         || !strncmp(p, "/proc/", 6) || !strcmp(p, "/proc")
         || !strncmp(p, "/sys/", 5) || !strcmp(p, "/sys")
+        || !strncmp(p, "/system/", 8) || !strcmp(p, "/system")
+        || !strncmp(p, "/apex/", 6)
+        || !strncmp(p, "/vendor/", 8)
+        || !strncmp(p, "/product/", 9)
+        || !strncmp(p, "/linkerconfig/", 14)
+        || !strncmp(p, "/data/", 6)
         || (baselen && strncmp(p, base, baselen) == 0);
 }
 
@@ -210,6 +220,124 @@ static int rewrite2(const char *in, char *out, size_t outsz, pid_t pid) {
     int changed = rewrite(in, out, outsz);
     if (proc_self_fix(out, outsz, pid)) changed = 1;
     return changed;
+}
+
+/* ---- shebang-in-container untuk C_EXEC (device-feedback 2026-10-07) ----
+ * Kernel host me-resolve interpreter `#!` terhadap ROOT HOST. Script wadah
+ * (mis. trigger apk `#!/bin/busybox sh`) -> /bin/busybox tak ada di Android
+ * -> execve ENOENT (rc=127), padahal jalur shim sukses. Di svsp child tak
+ * punya shim, jadi supervisor yang membereskan — TANPA bedah memori argv:
+ * script-nya sendiri (di $BASE, supervisor bisa tulis) DITULIS ULANG jadi
+ * wrapper `#!/system/bin/sh` yang meng-exec interpreter wadah lewat loader
+ * musl patched; isi asli dipindah ke <file>.orig-svsp. Child diblok selama
+ * notifikasi -> bebas race. Idempoten (marker "svsp-shebang-wrapper"). */
+static int host_pass_prefix(const char *p) {
+    static const char *pre[] = { "/system/", "/data/", "/dev/", "/proc/",
+                                 "/sys/", "/apex/", "/vendor/", "/product/",
+                                 NULL };
+    for (int i = 0; pre[i]; i++)
+        if (strncmp(p, pre[i], strlen(pre[i])) == 0) return 1;
+    return 0;
+}
+
+static int shebang_wrap(const char *H) {
+    int fd = open(H, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) { close(fd); return 0; }
+    char hdr[256];
+    ssize_t n = pread(fd, hdr, sizeof hdr - 1, 0);
+    close(fd);
+    if (n < 3 || hdr[0] != '#' || hdr[1] != '!') return 0;   /* bukan script */
+    hdr[n] = '\0';
+    if (strstr(hdr, "svsp-shebang-wrapper")) return 1;        /* sudah dibungkus */
+    char *nl = strchr(hdr, '\n'); if (nl) *nl = '\0';         /* baris pertama */
+    char *p = hdr + 2;
+    while (*p == ' ' || *p == '\t') p++;
+    char *interp = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    if (*p) { *p++ = '\0'; while (*p == ' ' || *p == '\t') p++; }
+    char *sarg = p;                                            /* boleh kosong */
+    if (interp[0] != '/') return 0;             /* interp relatif: urus kernel */
+    if (host_pass_prefix(interp)) return 0;     /* memang path host */
+    char ih[4352];
+    snprintf(ih, sizeof ih, "%s%s", base, interp);
+    if (access(ih, X_OK) != 0) return 0;        /* interp memang tak ada */
+
+    const char *host_sh = getenv("SVSP_HOST_SH");
+    if (!host_sh || !*host_sh) host_sh = "/system/bin/sh";
+    char loader[4352];
+    const char *ld = getenv("SVSP_LOADER");
+    if (ld && *ld) snprintf(loader, sizeof loader, "%s", ld);
+    else snprintf(loader, sizeof loader, "%s/lib/ld-musl-patched.so.1", base);
+    int use_loader = (access(loader, X_OK) == 0);
+
+    /* isi asli -> <H>.orig-svsp (skali saja) */
+    char origp[4608];
+    snprintf(origp, sizeof origp, "%s.orig-svsp", H);
+    if (access(origp, F_OK) != 0) {
+        int s = open(H, O_RDONLY | O_CLOEXEC);
+        int d2 = open(origp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                      st.st_mode & 0777);
+        if (s < 0 || d2 < 0) {
+            if (s >= 0) close(s);
+            if (d2 >= 0) { close(d2); unlink(origp); }
+            return -1;
+        }
+        char buf[8192]; ssize_t r; int bad = 0;
+        while ((r = read(s, buf, sizeof buf)) > 0) {
+            ssize_t w = 0;
+            while (w < r) {
+                ssize_t k = write(d2, buf + w, (size_t)(r - w));
+                if (k < 0) { bad = 1; break; }
+                w += k;
+            }
+            if (bad) break;
+        }
+        if (r < 0) bad = 1;
+        close(s); close(d2);
+        if (bad) { unlink(origp); return -1; }
+    }
+
+    /* wrapper ditulis ke tmp lalu rename (atomik) */
+    char tmpp[4608];
+    snprintf(tmpp, sizeof tmpp, "%s.wrap-tmp", H);
+    int d = open(tmpp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                 st.st_mode & 0777);
+    if (d < 0) return -1;
+    char sargbuf[300];
+    sargbuf[0] = '\0';
+    if (sarg[0]) snprintf(sargbuf, sizeof sargbuf, " \"%s\"", sarg);
+    char wbuf[10000];
+    int len;
+    if (use_loader)
+        len = snprintf(wbuf, sizeof wbuf,
+            "#!%s\n"
+            "# svsp-shebang-wrapper v1 (dibuat otomatis oleh svsp; jangan diedit)\n"
+            "exec \"%s\" \"%s\"%s \"%s\" \"$@\"\n",
+            host_sh, loader, ih, sargbuf, origp);
+    else
+        len = snprintf(wbuf, sizeof wbuf,
+            "#!%s\n"
+            "# svsp-shebang-wrapper v1 (dibuat otomatis oleh svsp; jangan diedit)\n"
+            "exec \"%s\"%s \"%s\" \"$@\"\n",
+            host_sh, ih, sargbuf, origp);
+    int bad = 0;
+    if (len < 0 || (size_t)len >= sizeof wbuf) bad = 1;
+    else {
+        ssize_t w = 0;
+        while (w < len) {
+            ssize_t k = write(d, wbuf + w, (size_t)(len - w));
+            if (k < 0) { bad = 1; break; }
+            w += k;
+        }
+    }
+    if (close(d) < 0) bad = 1;
+    if (bad) { unlink(tmpp); return -1; }
+    if (rename(tmpp, H) < 0) { unlink(tmpp); return -1; }
+    DBG("shebang wrap: %s -> interp=%s%s%s\n", H, ih,
+        sarg[0] ? " sarg=" : "", sarg[0] ? sarg : "");
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -480,6 +608,22 @@ static void handle(int listener, const struct seccomp_notif *req) {
         forced = 1;
     if (cls == C_OPEN && nr == SYS_openat && SVSP_HAS_TMPFILE(a[2]))
         forced = 1;
+    /* exec selalu ditangani: script shebang wadah butuh wrapping walau
+     * path-nya relatif/tak berubah (lihat shebang_wrap). */
+    if (cls == C_EXEC)
+        forced = 1;
+
+    /* pembersihan shebang-wrap: script wadah di-unlink (apk menghapus
+     * trigger di lib/apk/exec pasca-run) -> buang juga .orig-svsp-nya.
+     * Best effort; cwd supervisor == base (chdir di main). */
+    if (cls == C_SIDE && (nr == SYS_unlinkat || nr == SYS_unlink)) {
+        char og[4400];
+        if (pbuf[0] == '/' && !passthrough(pbuf))
+            snprintf(og, sizeof og, "%s%s.orig-svsp", base, pbuf);
+        else
+            snprintf(og, sizeof og, "%s.orig-svsp", pbuf);
+        unlink(og);
+    }
 
     /* tidak berubah -> biarkan kernel menjalankannya di child */
     if (!changed && !forced) {
@@ -611,6 +755,23 @@ static void handle(int listener, const struct seccomp_notif *req) {
         break;
     }
     case C_EXEC: {
+        /* shebang-in-container: bila target script wadah dgn interpreter
+         * absolut wadah, tulis ulang jadi wrapper host (best effort; gagal
+         * wrap = kernel kasih ENOENT seperti sebelumnya). */
+        {
+            char hc[4400];
+            const char *hp;
+            if (pbuf[0] == '/') hp = pout;
+            else { snprintf(hc, sizeof hc, "%s/%s", base, pbuf); hp = hc; }
+            shebang_wrap(hp);
+        }
+        /* path RELATIF tak berubah: tak ada yang perlu di-rewrite di memori
+         * child (lagi pula string bisa di .rodata) -> langsung CONTINUE. */
+        if (!changed) {
+            send_resp(listener, req->id, 0, 0,
+                      SECCOMP_USER_NOTIF_FLAG_CONTINUE);
+            break;
+        }
         /* rewrite path di memori child; absolut dulu, fallback relatif */
         size_t newlen = strlen(pout);
         const char *w;

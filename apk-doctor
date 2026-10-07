@@ -50,8 +50,19 @@ REPORT=$(awk '
     }
 ' "$DB")
 
+clean_orphans() {
+    # sisa wrapper shebang svsp (HANDOFF §19): lib/apk/exec/*.orig-svsp yatim
+    local ORPH
+    ORPH=$(find "$BASE/lib/apk/exec" -name '*.orig-svsp' 2>/dev/null)
+    if [ -n "$ORPH" ]; then
+        printf '%s\n' "$ORPH" | while IFS= read -r f; do rm -f "$f"; done
+        echo "apk-doctor: sisa wrapper svsp (*.orig-svsp) dibersihkan."
+    fi
+}
+
 if [ -z "$REPORT" ]; then
     echo "apk-doctor: bersih — tidak ada flag broken_files/broken_script di DB."
+    [ "$CLEAR" -eq 1 ] && clean_orphans
     exit 0
 fi
 
@@ -84,5 +95,7 @@ awk '
 ' "$BAK" > "$DB.tmp.$$" || { rm -f "$DB.tmp.$$"; echo "apk-doctor: awk gagal; DB tak diubah" >&2; exit 1; }
 
 mv "$DB.tmp.$$" "$DB" || { echo "apk-doctor: mv gagal; DB tak diubah" >&2; exit 1; }
+
+clean_orphans
 echo "apk-doctor: flag f/s dibersihkan. Backup lama: $BAK"
 echo "Cek: fake-run apk add --simulate busybox   (harus bebas '1 error')"

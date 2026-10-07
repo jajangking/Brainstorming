@@ -88,3 +88,39 @@ Salin kerangka `device-feedback/2026-10-07.md` yang sudah disiapkan di repo
 ini, isi tiap bagian, commit + push. Kalau ada hasil yang gagal: tuliskan
 perintah persis, output persis, dan dugaanmu — agent Arena akan menyiapkan
 patch berikutnya dari situ.
+
+---
+
+# RONDE 2 (2026-10-07, sesudah feedback pertamamu — terima kasih!)
+
+Feedback-mu (`device-feedback/2026-10-07.md`) sudah diproses; semua temuan
+diperbaiki di branch ini (lihat HANDOFF §19). Fix utamamu yang sekarang ada:
+
+1. **shebang-in-container di svsp** (`shebang_wrap()`): trigger `#!/bin/busybox
+   sh` kini dibungkus otomatis jadi wrapper `#!/system/bin/sh` yang menjalankan
+   interpreter wadah lewat loader patched. Kasus `CANNOT LINK /bin/sh`
+   (ca-certificates) ikut tertutup. File `.orig-svsp` dibersihkan saat apk
+   meng-unlink trigger; yang yatim dibersihkan `apk-doctor --clear-broken`.
+2. `passthrough()` svsp + `/system /apex /vendor /product /linkerconfig /data`.
+3. Regresi SBARGS fake-run (arg shebang tak lagi hilang).
+4. `fake-run` tahan `env -i` (default HOME/PREFIX) + pass-through SVSP_DEBUG.
+5. Resep: `hello` → `acl`; SVSP_DEBUG lewat argumen.
+
+## Tugas ronde 2
+
+Jalankan **checklist HANDOFF §19.4** apa adanya, lalu isi
+`device-feedback/ronde2.md` (template sudah di repo). Hal khusus yang kami
+butuhkan darimu:
+
+- RC dan output penuh tiap perintah checklist (jujur, termasuk kegagalan).
+- Isi `$BASE/lib/apk/exec/` sesudah transaksi svsp (harus kosong; kalau ada
+  `.orig-svsp` yatim → laporkan, itu bug pembersihan).
+- Apakah wrapper svsp terlihat benar bila kamu `cat` file trigger SEBELUM apk
+  menghapusnya? (bisa disiasati: `SVSP_DEBUG=1 fake-run --svsp apk add
+  --no-cache acl` lalu cepat `ls`/`cat`, atau baca dari log — bebas kreativitasmu,
+  tak wajib).
+- Apakah masih ada "1 error" di transaksi mana pun yang melibatkan trigger?
+- Usul bebas untuk fix berikutnya.
+
+Aturan main sama seperti ronde 1: jujur, jangan menebak, tulis "N/A" bila tak
+bisa, commit + push file feedback (atau titip lewat user ke chat Arena).
