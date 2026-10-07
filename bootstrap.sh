@@ -125,7 +125,7 @@ musl_dev() {
     if [ ! -f "$cached" ]; then
         curl -fSL -o "$cached" "$CDN/main/aarch64/$pkg" || die "gagal unduh $pkg"
     fi
-    tar -xzf "$cached" -C "$BASE" usr/ || die "ekstraksi musl-dev gagal"
+    tar -xzf "$cached" -C "$BASE" usr/ 2>/dev/null || die "ekstraksi musl-dev gagal"
 
     # Header UAPI linux (linux/audit.h dll) dibutuhkan untuk build svsp statis
     # (musl). Paket terpisah dari musl-dev; ikuti pola cache + indeks yang sama.
