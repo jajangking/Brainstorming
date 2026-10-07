@@ -150,7 +150,7 @@ log "Loader patched OK"
 # Quick test
 info "Quick test..."
 RESULT=$(env -u LD_PRELOAD "$FR" --base="$BASE" cat /etc/alpine-release 2>/dev/null || echo "GAGAL")
-if echo "$RESULT" | grep -q "3.24.2"; then
+if echo "$RESULT" | grep "3.24.2" >/dev/null; then
     log "Test dinamis: $RESULT"
 else
     die "Test gagal! Hasil: $RESULT"
@@ -158,7 +158,7 @@ fi
 
 # Isolation test
 ISO_RESULT=$(env -u LD_PRELOAD "$FR" --base="$BASE" cat /system/build.prop 2>&1 || true)
-if echo "$ISO_RESULT" | grep -qi "enoent\|no such"; then
+if echo "$ISO_RESULT" | grep -i "enoent\|no such" >/dev/null; then
     log "Isolasi: /system/build.prop → ENOENT (benar!)"
 else
     warn "Isolasi: hasil tidak terduga: $ISO_RESULT"
