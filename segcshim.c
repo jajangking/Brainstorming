@@ -36,10 +36,12 @@ struct ksigaction {
     unsigned long sa_mask;
 };
 
+static int segcshim_debug = 0;
+
 static void on_sigsys(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = uctx;
     (void)sig;
-    syscall(SYS_write, 2, "HIT\n", 4);   /* penanda debug */
+    if (segcshim_debug) syscall(SYS_write, 2, "HIT\n", 4);
     /* si_call_addr = alamat instruksi svc; +4 = instruksi berikutnya */
     uc->uc_mcontext.pc = (unsigned long)info->si_call_addr + 4;
 
@@ -57,11 +59,24 @@ static void on_sigsys(int sig, siginfo_t *info, void *uctx) {
 
 __attribute__((constructor))
 static void segcshim_init(void) {
+    /* cek env SECSHIM_DEBUG secara manual (nostdlib-friendly) */
+    {
+        extern char **environ;
+        char **ep = environ;
+        if (ep) while (*ep) {
+            char *s = *ep;
+            if (s[0]=='S' && s[1]=='E' && s[2]=='C' && s[3]=='S' &&
+                s[4]=='H' && s[5]=='I' && s[6]=='M' && s[7]=='_' &&
+                s[8]=='D' && s[9]=='E' && s[10]=='B' && s[11]=='U' &&
+                s[12]=='G' && s[13]=='=') { segcshim_debug = 1; break; }
+            ep++;
+        }
+    }
     struct ksigaction ka;
     ka.sa_handler   = (void *)on_sigsys;
     ka.sa_flags     = SA_SIGINFO;
     ka.sa_restorer  = 0;
     ka.sa_mask      = 0;
     syscall(SYS_rt_sigaction, SIGSYS, &ka, 0, 8);
-    syscall(SYS_write, 2, "INIT\n", 5);   /* penanda debug */
+    if (segcshim_debug) syscall(SYS_write, 2, "INIT\n", 5);
 }

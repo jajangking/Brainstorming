@@ -102,7 +102,7 @@ if [ "$MODE" = svsp ]; then
       -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
       FAKE_BASE="$HOME_BASE" \
       TERM="${TERM:-xterm-256color}" \
-      "${extra_env[@]}" \
+      ${extra_env[@]+"${extra_env[@]}"} \
       "$SVSP" --base="$HOME_BASE" "$host" "$@"
 fi
 
@@ -120,5 +120,5 @@ exec env -i \
   PWD="$HOME_BASE" \
   USER=root LOGNAME=root SHELL=/bin/sh \
   TERM="${TERM:-xterm-256color}" \
-  "${extra_env[@]}" \
+  ${extra_env[@]+"${extra_env[@]}"} \
   "$LOADER" "$host" "$@"

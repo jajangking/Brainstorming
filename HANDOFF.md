@@ -88,7 +88,7 @@ Bila output tidak sesuai → jangan lanjut, perbaiki dulu lingkungannya.
 > (`git clone` → `bootstrap.sh` → `fake-run cat /etc/alpine-release` → `3.24.2`) +
 > semua perubahan di-commit & di-push ke `main`.
 
-### 6.1 `openat2` (SYS 437) masuk aturan `svsp.c` — celah kecil
+### 6.1 `openat2` (SYS 437) masuk aturan `svsp.c` — celah kecil ✅ SELESAI
 
 Perilaku saat ini: `openat2` **tidak** di-notify → path host yang TIDAK dicegat (openat2
 dipakai beberapa program modern). `openat2` pada arm64 = **437** (bionic
@@ -122,7 +122,7 @@ Sketsa perubahan di `svsp.c`:
 
 Kriteria terima: `eptest`-ber-`openat2` (pakai `syscall(SYS_openat2, AT_FDCWD, "/etc/alpine-release", &how, sizeof how)`) di dalam wadah membuka `base/etc/alpine-release`; ulangi V1–V4 + gobukti → tetap hijau.
 
-### 6.2 Benchmark overhead per round-trip supervisor (angka jujur)
+### 6.2 Benchmark overhead per round-trip supervisor (angka jujur) ✅ SELESAI
 
 Tujuan: angka realistis di README — "berapa μs per syscall path yang di-rewrite".
 
@@ -136,7 +136,7 @@ Cara:
 
 Kriteria terima: angka terukur tercantum di README; tak ada regresi fungsi (V1–V4).
 
-### 6.3 Zombie/grandchild di `svsp`
+### 6.3 Zombie/grandchild di `svsp` ✅ SELESAI
 
 Sudah ada: `waitpid(WNOHANG)` pada `pid` target (loop `poll(200ms)` + `waitpid`), supaya
 RECV yang tidak pernah bangun saat target mati tidak menggantung. Yang belum rapi:
@@ -152,7 +152,7 @@ Perbaikan yang diinginkan:
 Kriteria terima: sesi `svsp` yang menjalankan rantai `sh` ber-fork panjang tidak meninggal
 zombie (cek `ps` sebelum/sesudah), rc target tetap benar, V1–V4 hijau.
 
-### 6.4 Cache rewrite (hemat kerja per-notif)
+### 6.4 Cache rewrite (hemat kerja per-notif) ✅ SELESAI
 
 Jujur: round-trip kernel tetap terjadi per notif (tidak bisa dihilangkan). Yang bisa
 dihemat = pekerjaan supervisor per notif:
@@ -165,7 +165,7 @@ dihemat = pekerjaan supervisor per notif:
 Kriteria terima: overhead terukur turun atau tidak naik (bandingkan dengan 6.2), semua uji
 regresi hijau, tidak ada perubahan perilaku rewrite.
 
-### 6.5 Uji daya tahan nyata (Claude + `apk add` sungguhan)
+### 6.5 Uji daya tahan nyata (Claude + `apk add` sungguhan) ⏳ PERLU DEVICE
 
 **(a) `apk add` paket nyata DI DALAM wadah:**
 1. `cp /etc/resolv.conf $R/etc/resolv.conf` (musl baca resolv.conf dari wadah; tanpa ini
@@ -316,3 +316,14 @@ di depan fake-run saat tes.
 - Pasca-TAHAP 4: bug `epoll_ctl=21` vs fallback `rmdir` ditemukan & diperbaiki; bukti Go
   statis asli (`examples/gobukti.go`) dan claude 2.1.291 → `f7e5fd7`.
 - Dokumen ini: `HANDOFF.md` untuk melanjutkan pengerasan 5 item (lihat §6).
+- Arena.ai (2026-10-07): bug fix + pengerasan checklist:
+  - **Bug fix `libfakeroot.c`**: `execl()` argc counting selalu 64 (UB) → sekarang scan NULL terminator; `getwd()` return `int` (pointer terpotong di 64-bit) → `char *`; tambah intercept `statx()`.
+  - **Bug fix `svsp.c`**: exit code child tidak propagate (selalu 0) → `WEXITSTATUS`/`WTERMSIG`.
+  - **Bug fix `segcshim.c`**: debug output hardcoded `"HIT\n"`/`"INIT\n"` → conditional `SECSHIM_DEBUG` env.
+  - **Bug fix `block-trap.c`**: missing `#include <errno.h>`.
+  - **Bug fix `fake-run`**: empty array expansion under `set -u` → `${array[@]+"${array[@]}"}`.
+  - **6.1**: `openat2` (SYS 437) ditambahkan ke rules, path_argidx, handler (baca `struct open_how` via `process_vm_readv`).
+  - **6.2**: benchmark program `examples/ebench.c` (1000 iterasi open+close, passthrough vs rewrite, μs/op).
+  - **6.3**: zombie/grandchild cleanup: `SIGCHLD` handler + `waitpid(-1, WNOHANG)` di loop poll svsp.
+  - **6.4**: cache rewrite FNV-1a (512 entri) + reorder rules BPF (openat/newfstatat/statx di depan).
+  - **6.5**: perlu device nyata (Termux aarch64) untuk `apk add` + Claude sesi.

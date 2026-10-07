@@ -65,6 +65,18 @@
 #define SYS_readlink 89
 #endif
 
+/* openat2: arm64 SYS=437; struct open_how { u64 flags; u64 mode; u64 resolve; } */
+#ifndef SYS_openat2
+#define SYS_openat2 437
+#endif
+#ifndef HAVE_STRUCT_OPEN_HOW
+struct open_how {
+    __u64 flags;
+    __u64 mode;
+    __u64 resolve;
+};
+#endif
+
 #define DBG(...) do { if (svsp_debug) { fprintf(stderr, "[svsp] " __VA_ARGS__); } } while (0)
 
 static int svsp_debug = 0;
@@ -121,30 +133,41 @@ enum { C_OPEN = 1, C_STAT, C_STATX, C_STATFS, C_EXEC, C_READLINK,
 
 struct rule { int cls; long nr; };
 static struct rule rules[] = {
+    /* paling sering dipakai (openat, stat, statx) — di depan utk BPF scan pendek */
     { C_OPEN,      SYS_openat      },
+#ifdef SYS_openat2
+    { C_OPEN,      SYS_openat2     },
+#endif
+    { C_STAT,      SYS_newfstatat  },
+#ifdef SYS_statx
+    { C_STATX,     SYS_statx       },
+#endif
     { C_EXEC,      SYS_execve      },
 #ifdef SYS_execveat
     { C_EXEC,      SYS_execveat    },
 #endif
-#ifdef SYS_statx
-    { C_STATX,     SYS_statx       },
-#endif
-    { C_STAT,      SYS_newfstatat  },
 #ifdef SYS_statfs
     { C_STATFS,    SYS_statfs      },
 #endif
     { C_CHDIR,     SYS_chdir       },
+    { C_READLINK,  SYS_readlinkat  },
+    { C_READLINK,  SYS_readlink    },
+    { C_SIDE,      SYS_mkdirat     },
+    { C_SIDE,      SYS_unlinkat    },
+    { C_SIDE,      SYS_faccessat   },
+    { C_SIDE,      SYS_fchmodat    },
+    { C_SIDE,      SYS_fchownat    },
+    { C_SIDE,      SYS_utimensat   },
+    { C_SIDE,      SYS_mknodat     },
 #ifdef SYS_mkdir
     { C_SIDE,      SYS_mkdir       },
 #endif
-    { C_SIDE,      SYS_mkdirat     },
 #ifdef SYS_rmdir
     { C_SIDE,      SYS_rmdir       },
 #endif
 #ifdef SYS_unlink
     { C_SIDE,      SYS_unlink      },
 #endif
-    { C_SIDE,      SYS_unlinkat    },
 #ifdef SYS_rename
     { C_SIDE,      SYS_rename      },
 #endif
@@ -166,19 +189,15 @@ static struct rule rules[] = {
 #ifdef SYS_symlinkat
     { C_SIDE,      SYS_symlinkat   },
 #endif
-    { C_READLINK,  SYS_readlink    },
-    { C_READLINK,  SYS_readlinkat  },
 #ifdef SYS_access
     { C_SIDE,      SYS_access      },
 #endif
-    { C_SIDE,      SYS_faccessat   },
 #ifdef SYS_faccessat2
     { C_SIDE,      SYS_faccessat2  },
 #endif
 #ifdef SYS_chmod
     { C_SIDE,      SYS_chmod       },
 #endif
-    { C_SIDE,      SYS_fchmodat    },
 #ifdef SYS_fchmodat2
     { C_SIDE,      SYS_fchmodat2   },
 #endif
@@ -188,18 +207,15 @@ static struct rule rules[] = {
 #ifdef SYS_lchown
     { C_SIDE,      SYS_lchown      },
 #endif
-    { C_SIDE,      SYS_fchownat    },
 #ifdef SYS_truncate
     { C_SIDE,      SYS_truncate    },
 #endif
-    { C_SIDE,      SYS_utimensat   },
 #ifdef SYS_utimes
     { C_SIDE,      SYS_utimes      },
 #endif
 #ifdef SYS_mknod
     { C_SIDE,      SYS_mknod       },
 #endif
-    { C_SIDE,      SYS_mknodat     },
 };
 
 static int cls_of(long nr) {
@@ -236,6 +252,48 @@ static int build_filter(struct sock_filter **out, __u16 *out_len) {
 }
 
 /* ------------------------------------------------------------------ */
+/* cache rewrite (hemat kerja per-notif)                               */
+/* ------------------------------------------------------------------ */
+#define CACHE_SIZE 512
+#define CACHE_MASK (CACHE_SIZE - 1)
+
+struct cache_entry {
+    __u64 hash;             /* FNV-1a hash of input path */
+    int   changed;          /* 1 if rewritten, 0 if passthrough */
+    char  out[256];         /* cached output path */
+    char  in[256];          /* cached input path (for collision check) */
+    int   valid;
+};
+static struct cache_entry rewrite_cache[CACHE_SIZE];
+
+static __u64 fnv1a(const char *s) {
+    __u64 h = 0xcbf29ce484222325ULL;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 0x100000001b3ULL; }
+    return h;
+}
+
+static int cache_lookup(const char *in, char *out, size_t outsz, int *changed) {
+    __u64 h = fnv1a(in);
+    struct cache_entry *e = &rewrite_cache[h & CACHE_MASK];
+    if (e->valid && e->hash == h && strcmp(e->in, in) == 0) {
+        snprintf(out, outsz, "%s", e->out);
+        *changed = e->changed;
+        return 1;  /* hit */
+    }
+    return 0;  /* miss */
+}
+
+static void cache_store(const char *in, const char *out, int changed) {
+    __u64 h = fnv1a(in);
+    struct cache_entry *e = &rewrite_cache[h & CACHE_MASK];
+    e->hash = h;
+    e->changed = changed;
+    snprintf(e->in, sizeof e->in, "%s", in);
+    snprintf(e->out, sizeof e->out, "%s", out);
+    e->valid = 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* tangani satu notifikasi                                             */
 /* ------------------------------------------------------------------ */
 static void send_resp(int listener, __u64 id, __s64 val, __s32 error,
@@ -249,6 +307,9 @@ static void send_resp(int listener, __u64 id, __s64 val, __s32 error,
 static int path_argidx(long nr) {
     switch (nr) {
     case SYS_openat:  case SYS_mkdirat:  case SYS_unlinkat:
+#ifdef SYS_openat2
+    case SYS_openat2:
+#endif
     case SYS_newfstatat: case SYS_readlinkat: case SYS_faccessat:
     case SYS_fchmodat: case SYS_fchownat: case SYS_mknodat:
     case SYS_utimensat:
@@ -285,7 +346,12 @@ static void handle(int listener, const struct seccomp_notif *req) {
     if (oldlen < 0) { send_resp(listener, req->id, 0, -EFAULT, 0); return; }
     pbuf[oldlen] = 0;
 
-    int changed = rewrite(pbuf, pout, sizeof pout);
+    /* cek cache dulu */
+    int changed;
+    if (!cache_lookup(pbuf, pout, sizeof pout, &changed)) {
+        changed = rewrite(pbuf, pout, sizeof pout);
+        cache_store(pbuf, pout, changed);
+    }
 
     /* tidak berubah -> biarkan kernel menjalankannya di child */
     if (!changed) {
@@ -296,7 +362,17 @@ static void handle(int listener, const struct seccomp_notif *req) {
 
     switch (cls) {
     case C_OPEN: {
-        int fd = openat(AT_FDCWD, pout, (int)a[2], (int)a[3]);
+        int fd;
+#ifdef SYS_openat2
+        if (nr == SYS_openat2) {
+            struct open_how how;
+            if (read_mem(pid, (void *)(uintptr_t)a[2], &how, sizeof how) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); break;
+            }
+            fd = syscall(SYS_openat2, AT_FDCWD, pout, &how, (size_t)a[3]);
+        } else
+#endif
+            fd = openat(AT_FDCWD, pout, (int)a[2], (int)a[3]);
         if (fd < 0) { send_resp(listener, req->id, 0, -errno, 0); break; }
         struct seccomp_notif_addfd add = { 0 };
         add.id = req->id;
@@ -641,7 +717,16 @@ int main(int argc, char **argv) {
     if (listener < 0) { fprintf(stderr, "svsp: tak dapat listener\n"); return 2; }
     DBG("listener=%d target_pid=%d base=%s\n", listener, (int)pid, base);
 
+    /* SIGCHLD: reap grandchild zombies */
+    {
+        struct sigaction sa_chld = { .sa_handler = SIG_DFL };
+        sigemptyset(&sa_chld.sa_mask);
+        sigaction(SIGCHLD, &sa_chld, NULL);
+    }
+
     for (;;) {
+        /* reap any zombie grandchildren */
+        while (waitpid(-1, NULL, WNOHANG) > 0) {}
         /* poll dgn batas waktu: kernel Android ini TIDAK membangunkan RECV
          * yang terblokir saat target mati -> deteksi via waitpid(WNOHANG) */
         struct pollfd pf = { .fd = listener, .events = POLLIN };
@@ -666,6 +751,14 @@ int main(int argc, char **argv) {
         }
         handle(listener, &req);
     }
-    waitpid(pid, NULL, 0);
-    return 0;
+    /* propagate child exit code */
+    {
+        int st;
+        if (waitpid(pid, &st, 0) >= 0) {
+            if (WIFEXITED(st)) { free(f); return WEXITSTATUS(st); }
+            if (WIFSIGNALED(st)) { free(f); return 128 + WTERMSIG(st); }
+        }
+    }
+    free(f);
+    return 1;
 }

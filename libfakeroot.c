@@ -134,6 +134,14 @@ int fstatat(int dirfd, const char *p, struct stat *s, int fl) {
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(fstatat, dirfd, b, s, fl); }
     return CALL(fstatat, dirfd, p, s, fl);
 }
+#ifdef SYS_statx
+#include <linux/stat.h>
+int statx(int dirfd, const char *p, int flags, unsigned int mask, struct statx *stx) {
+    NEXT(statx);
+    if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(statx, dirfd, b, flags, mask, stx); }
+    return CALL(statx, dirfd, p, flags, mask, stx);
+}
+#endif
 #ifdef __GLIBC__
 int stat64(const char *p, struct stat64 *s) {
     NEXT(stat64);
@@ -173,11 +181,14 @@ int execl(const char *p, const char *a0, ...) {
     char *b;
     if (fk_is_abs(p)) { b = malloc(PATH_MAX); fk_rewrite(b, PATH_MAX, p); }
     else b = (char *)p;
-    va_list ap; va_start(ap, a0);
-    int argc = 0; for (va_arg(ap, const char *); argc < 64; argc++) va_arg(ap, const char *);
-    va_end(ap);
-    /* susun argv */
+    /* hitung argc: scan varargs sampai NULL (jangan hardcode 64) */
+    va_list ap, ap2;
     va_start(ap, a0);
+    va_copy(ap2, ap);
+    int argc = 0;
+    while (va_arg(ap2, const char *) != NULL) argc++;
+    va_end(ap2);
+    /* susun argv */
     char **argv = alloca((size_t)(argc + 2) * sizeof(char *));
     argv[0] = (char *)a0;
     for (int i = 1; i <= argc; i++) argv[i] = va_arg(ap, char *);
@@ -455,7 +466,7 @@ char *getcwd(char *buf, size_t n) {
     }
     return r;
 }
-int getwd(char *buf) { return getcwd(buf, PATH_MAX) != NULL ? (int)(long)buf : -1; }
+char *getwd(char *buf) { return getcwd(buf, PATH_MAX); }
 
 /* ------------------------------------------------------------------ */
 static void fk_init(void) __attribute__((constructor));
