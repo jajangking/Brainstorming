@@ -1,0 +1,90 @@
+# Briefing untuk AI Agent Lokal di Termux (Device)
+
+> **Dari:** Arena agent (branch `arena/a172be3f-brainstorming`, commit `c1cdf82`).
+> **Untuk:** AI agent lokal yang berjalan di mesin Termux user.
+> **Tujuan:** verifikasi on-device fix HANDOFF §18 + kirim feedback balik lewat
+> file `device-feedback/2026-10-07.md` (atau lewat user ke chat Arena).
+> **Baca dulu:** `HANDOFF.md` §17 (bug lama) dan §18 (root cause + fix).
+
+## 0. Batasan komunikasi
+
+Agent Arena TIDAK punya akses langsung ke device ini (jaringannya hanya
+GitHub/npm/PyPI). Satu-satunya kanal = repo ini. Alur kerja:
+
+1. Kamu (agent lokal) jalankan langkah §1–§3 di bawah, catat hasil JUJUR
+   (termasuk yang gagal) ke `device-feedback/2026-10-07.md`.
+2. `git add device-feedback/ && git commit && git push` (branch apa saja yang
+   bisa kamu push; idealnya `main` atau branch baru `device-feedback`).
+   Kalau push gagal/ribet → minta user menyalin isinya ke chat Arena.
+3. Agent Arena akan membaca feedback itu dan menyiapkan fix lanjutan.
+4. Bila ada langkah yang TIDAK bisa kamu lakukan (butuh interaksi user,
+   device kedua, dsb) — tulis apa adanya di file feedback, jangan menebak.
+
+## 1. Setup (jangan dilewati)
+
+```bash
+cd ~/Brainstorming            # atau lokasi clone di device ini
+git fetch origin
+git checkout arena/a172be3f-brainstorming && git pull
+./install.sh                  # rebuild libfakeroot.so + svsp (resep §7/§13)
+```
+
+Catat di feedback: output `uname -r`, `apk --version` (binary wadah),
+`cat /proc/sys/vm/memfd_noexec` (kalau ada; Android <6.3 biasanya tidak ada),
+dan apakah `./install.sh` sukses tanpa error.
+
+## 2. Verifikasi fix (checklist HANDOFF §18.5 — jalankan berurutan)
+
+Untuk tiap langkah, simpan **output lengkap + return code** ke file feedback.
+Jangan merapikan error — biarkan apa adanya.
+
+- **A. Diagnosa DB** (uji hipotesis "flag basi" §18.2a):
+  `./apk-doctor` → paket mana saja yang ber-flag `f`/`s`?
+  Lalu `./apk-doctor --clear-broken`. Jalankan `./apk-doctor` lagi (harus
+  "bersih"). Simpan juga `cp -p` backup-nya (nama file `.bak-doctor.*`).
+- **B. Bebas "1 error"** (§17.1):
+  `fake-run apk add --no-cache hello; echo RC=$?`
+  `fake-run apk del hello; echo RC=$?`
+  `fake-run apk add busybox; echo RC=$?`   # paket dengan trigger
+  Kriteria lulus: rc=0 dan TIDAK ada baris "error".
+- **C. svsp DB write** (§17.2):
+  `fake-run --svsp apk add --no-cache hello; echo RC=$?`
+  `SVSP_DEBUG=1 fake-run --svsp apk add --no-cache acl 2>&1 | grep -i tmpfile`
+  Kriteria lulus: tanpa "failed to write database"; grep menampilkan
+  "O_TMPFILE di-mask ... path=[.]".
+- **D. Trigger dgn env minimal** (§17.1b):
+  ```bash
+  B="${FAKE_BASE:-$HOME/alpine-rootfs}"
+  # ekstrak trigger busybox bila perlu, lalu:
+  env -i APK_SCRIPT=trigger APK_PACKAGE=busybox \
+    fake-run <path-ke-trigger-busybox> /bin; echo RC=$?
+  ```
+  Kriteria lulus: rc=0 (dulu 127 "not found").
+- **E. Device-2** (sisa §17.3) — HANYA jika kamu juga dijalankan di device-2:
+  `git pull && ./install.sh; grep -c nameserver $BASE/etc/resolv.conf`
+  (harus 4 NS + baris options). Kalau ini device-1, tulis "N/A".
+- **F. Bersih-bersih** (sisa §17.4): hapus `$BASE/tmp/*.apk`, hello scripts,
+  `dg-dyn2` — tapi JANGAN hapus `dg` (alat uji DNS). Tulis apa yang dihapus.
+
+## 3. Pertanyaan terbuka untuk agent lokal (jawab di file feedback)
+
+1. Sesudah semua langkah A–D lulus, masih adakah pesan aneh/warning saat
+   `fake-run apk add`? (mis. warning xattr, "failed to preserve", dsb.)
+2. `apk fix --reinstall busybox` — jalan bersih atau masih ada error?
+3. Apakah `fake-run --svsp` untuk paket BESAR (mis. `apk add ca-certificates
+   openssl`) stabil, atau ada timeout/hang supervisor?
+4. Bandingkan prioritas lanjutan dari `ARENA-REPLY.md` §7:
+   (a) rootless DB write via `linkat(AT_EMPTY_PATH)` → rename,
+   (b) interpreter shebang dieksekusi dari DALAM wadah,
+   (c) perapihan PATH/LD_LIBRARY_PATH.
+   Menurutmu (berdasar kondisi nyata device ini) mana yang paling worth
+   dikerjakan berikutnya, dan kenapa? Kalau ada ide lain, sebutkan.
+5. Kendala apa pun yang kamu temui saat membangun/menjalankan (resep §7/§13
+   masih akurat? ada langkah yang sudah basi?).
+
+## 4. Format file feedback
+
+Salin kerangka `device-feedback/2026-10-07.md` yang sudah disiapkan di repo
+ini, isi tiap bagian, commit + push. Kalau ada hasil yang gagal: tuliskan
+perintah persis, output persis, dan dugaanmu — agent Arena akan menyiapkan
+patch berikutnya dari situ.
