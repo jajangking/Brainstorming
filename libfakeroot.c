@@ -231,12 +231,16 @@ static int fk_exec_one(const char *hostpath, char *const argv[], char *const env
         const char *loader = fk_loader_path();
         int n = 0;
         while (argv && argv[n]) n++;
-        char **nav = malloc(((size_t)n + 3) * sizeof(char *));
+        /* loader hostpath argv[1] argv[2] ... NULL
+         * (argv[0] = program name TIDAK di-copy karena hostpath sudah jadi argv[0]
+         *  saat loader me-re-exec: ld-musl.so.1 hostpath → program argv[0] = hostpath) */
+        char **nav = malloc(((size_t)n + 2) * sizeof(char *));
         if (!nav) { errno = ENOMEM; return -1; }
         nav[0] = (char *)loader;
         nav[1] = (char *)hostpath;
-        for (int k = 0; k < n; k++) nav[k + 2] = argv[k];
-        nav[n + 2] = NULL;
+        int m = 2;
+        for (int k = 1; k < n; k++) nav[m++] = argv[k];  /* skip argv[0] */
+        nav[m] = NULL;
         NEXT(execve);
         int r = CALL(execve, loader, nav, envp);
         free(nav);
