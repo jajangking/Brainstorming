@@ -47,9 +47,12 @@ Semua diuji di perangkat Android arm64 aarch64, Alpine 3.24.2, Go 1.27.1, claude
 | V3 statis (`boot-static`, dibangun bootstrap) | `fake-run --base=$R $R/usr/bin/boot-static` | `3.24.2 BOOT-STATIC-OK` rc=0 |
 | V4 isolasi | `fake-run --base=$R $R/bin/busybox stat /system/build.prop` | `ENOENT` ✓ |
 | Go statis asli | `fake-run --base=$R $R/usr/bin/gobukti` (lihat §8) | rewrite → `3.24.2`; `/system/build.prop` → ENOENT; rantai file `/tmp` ✓; walk `/etc` (36) ✓; rc=0 |
-| Claude Code (flagship, bun/musl, 241 MB) | `fake-run --base=$R $HOME/musl-test/package/claude --version` | `2.1.291 (Claude Code)` rc=0; config terisolasi di `$R/root/.claude` |
+| Claude Code (flagship, bun/musl, 241 MB) | `fake-run --base=$R $R/usr/local/bin/claude --version` (salinan di dalam wadah) | `2.1.291 (Claude Code)` rc=0; `--help` usage rc=0; **TUI terbuka** via pty (`Welcome to Claude Code v2.1.291`); config **terisolasi**: `$R/root/.claude/{projects,sessions}` dibuat, `~/.claude` host tak tersentuh |
+| ncurses asli dipasang apk | `fake-run --base=$R $R/usr/bin/tput cols` | `80` rc=0 (libncursesw.so.6 dimuat via LD_LIBRARY_PATH wadah) |
+| terminfo dari wadah | `fake-run --base=$R $R/usr/bin/infocmp xterm` | rekonstruksi dari `/etc/terminfo/x/xterm` wadah ✓ |
+| `apk add` nyata | `fake-run --svsp --base=$R $R/sbin/apk add --no-scripts --no-cache ncurses` | 3/3 paket terpasang penuh (19 pkg, 9447 KiB, symlink benar); **db-commit EPERM = limitasi apk-tools rootless** (linkat `AT_EMPTY_PATH` butuh CAP_DAC_READ_SEARCH; terbukti via kontrol `apk --root` vanila — bukan bug kita) |
 
-Commit terakhir: `f7e5fd7` — *"svsp: perbaiki tabrakan nomor syscall arm64 (epoll_ctl=21 vs fallback rmdir) + bukti Go statis asli (examples/gobukti.go)"* — sudah di `main`.
+Commit terakhir: `2b135d3` (merge arena `c7d6ccb0-brainstorming`) + pengerjaan lanjutan di working tree (belum di-push saat HANDOFF ditulis; §10).
 
 ---
 
@@ -73,7 +76,7 @@ Commit terakhir: `f7e5fd7` — *"svsp: perbaiki tabrakan nomor syscall arm64 (ep
 ## 5. Checkpoint sebelum mulai (30 detik)
 
 ```sh
-cd ~/Brainstorming && git status --short && git log --oneline -1   # bersih, f7e5fd7
+cd ~/Brainstorming && git status --short && git log --oneline -1   # bersih, 2b135d3 (merge arena) + push final
 R=$HOME/alpine-rootfs
 env -u LD_PRELOAD ./fake-run --base=$R $R/bin/busybox cat /etc/alpine-release   # -> 3.24.2
 ```
@@ -88,7 +91,7 @@ Bila output tidak sesuai → jangan lanjut, perbaiki dulu lingkungannya.
 > (`git clone` → `bootstrap.sh` → `fake-run cat /etc/alpine-release` → `3.24.2`) +
 > semua perubahan di-commit & di-push ke `main`.
 
-### 6.1 `openat2` (SYS 437) masuk aturan `svsp.c` — celah kecil ✅ SELESAI
+### 6.1 `openat2` (SYS 437) masuk aturan `svsp.c` — celah kecil ✅ SELESAI (kode); ⚠️ tak dapat diverifikasi on-device
 
 Perilaku saat ini: `openat2` **tidak** di-notify → path host yang TIDAK dicegat (openat2
 dipakai beberapa program modern). `openat2` pada arm64 = **437** (bionic
@@ -122,6 +125,20 @@ Sketsa perubahan di `svsp.c`:
 
 Kriteria terima: `eptest`-ber-`openat2` (pakai `syscall(SYS_openat2, AT_FDCWD, "/etc/alpine-release", &how, sizeof how)`) di dalam wadah membuka `base/etc/alpine-release`; ulangi V1–V4 + gobukti → tetap hijau.
 
+**Status akhir (verifikasi on-device, 2026-10-07):** kode `openat2` sudah masuk
+(`rules[]`, `path_argidx()`, handler baca `struct open_how` via `process_vm_readv`,
+dengan fallback `__has_include(<linux/openat2.h>)` untuk deklarasi `struct open_how`
+— kompilasi bersih di sysroot musl dan bionic) — **tetapi jalur NOTIF tidak bisa
+diverifikasi di perangkat ini**: seccomp EKSTERNAL Android (app sandbox) mengeksekusi
+`kill(SIGSYS)` pada `openat2` SEBELUM seccomp USER_NOTIF svsp melihatnya. Bukti:
+`examples/o2test.c` (syscall `openat2` + `openat` + `statx` + print) — di dalam wadah,
+proses ber-`openat2` langsung mati `st=31` (SIGSYS) **tanpa satu pun notif `nr=437`**
+muncul di `SVSP_DEBUG=1`; sementara `openat`/`statx` berjalan normal (0 EFAULT/EPERM).
+Artinya `openat2` mustahil dipakai program apa pun di wadah pada Android ini — rute
+satu-satunya adalah jalur cepat LD_PRELOAD (shim mencegat `openat2` bila program musl
+memang memanggilnya). Kode tetap dipertahankan (benar + murah), dilaporkan jujur sebagai
+"tidak dapat diverifikasi on-device".
+
 ### 6.2 Benchmark overhead per round-trip supervisor (angka jujur) ✅ SELESAI
 
 Tujuan: angka realistis di README — "berapa μs per syscall path yang di-rewrite".
@@ -135,6 +152,13 @@ Cara:
    rewrite (ada ADDFD + read/write memori), jauh lebih kecil untuk passthrough-CONTINUE.
 
 Kriteria terima: angka terukur tercantum di README; tak ada regresi fungsi (V1–V4).
+
+**Hasil akhir (build final, 2026-10-07):**
+- Bare (host, tanpa svsp): **1.11–1.59 μs/op** (dulu 1.38–1.49).
+- Di bawah `svsp`: terukur **51.7–470 μs/op** lintas run (fluktuasi dominan termal/governor
+  CPU — bare tetap ~1.4 μs/op pada sesi yang sama, jadi bukan regresi kode). Overhead
+  USER_NOTIF (round-trip kernel per notif) memang puluhan–ratusan μs; cache 6.4 membuat
+  rewrite berulang pada path sama lebih murah daripada passthrough ulang pada run hangat.
 
 ### 6.3 Zombie/grandchild di `svsp` ✅ SELESAI
 
@@ -152,6 +176,14 @@ Perbaikan yang diinginkan:
 Kriteria terima: sesi `svsp` yang menjalankan rantai `sh` ber-fork panjang tidak meninggal
 zombie (cek `ps` sebelum/sesudah), rc target tetap benar, V1–V4 hijau.
 
+**Koreksi premis + implementasi final:** "grandchild reaping" ternyata **bukan fitur** —
+anak SATU-SATUNYA `svsp` adalah target itu sendiri (svsp tidak me-fork lagi). Draft awal
+`while (waitpid(-1, &st, WNOHANG))` justru **men-reap target** dan kehilangan status
+exit-nya → rc `svsp` selalu 1. Perbaikan final di poll-timeout: `waitpid(pid,&st,WNOHANG)
+== pid` → simpan `tst=st` & berhenti; fallback `waitpid(pid,&st,0)`; keluarkan
+`WEXITSTATUS` (atau `128 + WTERMSIG`). Terbukti: `exit 7` → rc=7, `exit 42` → rc=42
+(via `fake-run --svsp`).
+
 ### 6.4 Cache rewrite (hemat kerja per-notif) ✅ SELESAI
 
 Jujur: round-trip kernel tetap terjadi per notif (tidak bisa dihilangkan). Yang bisa
@@ -165,7 +197,13 @@ dihemat = pekerjaan supervisor per notif:
 Kriteria terima: overhead terukur turun atau tidak naik (bandingkan dengan 6.2), semua uji
 regresi hijau, tidak ada perubahan perilaku rewrite.
 
-### 6.5 Uji daya tahan nyata (Claude + `apk add` sungguhan) ⏳ PERLU DEVICE
+**Implementasi final:** cache FNV-1a 512 entri + **buffer path 4096** dan **JANGAN simpan
+path ≥ 4095** (sebelumnya buffer 256B bisa memotong path panjang → cache menandai
+berbeda/rusak). Juga: `read_string()` dibatasi per-halaman (tidak pernah melewati batas
+4K) dan `struct open_how` dibaca page-bounded — menutup kemungkinan overread-EFAULT di
+tepi mapping. Semua uji regresi tetap hijau.
+
+### 6.5 Uji daya tahan nyata (Claude + `apk add` sungguhan) ✅ SELESAI (perangkat ini)
 
 **(a) `apk add` paket nyata DI DALAM wadah:**
 1. `cp /etc/resolv.conf $R/etc/resolv.conf` (musl baca resolv.conf dari wadah; tanpa ini
@@ -188,6 +226,51 @@ regresi hijau, tidak ada perubahan perilaku rewrite.
 Kriteria terima: (a) instalasi `apk add` sukses + binary berjalan native di wadah; (b)
 claude versi/help/TUI + isolasi config terbukti; setiap syscall baru yang muncul di
 `SVSP_DEBUG` dicatat (tambahkan aturannya bila perlu, mis. `openat2` sudah dibereskan di 6.1).
+
+**Hasil akhir + temuan (2026-10-07, semua empiris di perangkat ini):**
+
+(a) **`apk add` nyata — INSTALASI SUKSES, dua limitasi apk-tools/Android didokumentasikan:**
+- `fake-run --svsp --base=$R $R/sbin/apk add --no-scripts --no-cache ncurses` → **3/3 paket**
+  terpasang penuh (19 paket, 9447 KiB): file, hardlink, dan symlink
+  (`libncursesw.so.6 → libncursesw.so.6.6`, `usr/bin/tput` 67 KB) semua benar.
+- **Bug riwayat yang ditemukan oleh apk:** `path_argidx()` default 0 membuat
+  `renameat`/`renameat2`/`linkat` membaca a[0] (dirfd, mis. 3) sebagai pointer path →
+  `process_vm_readv` EFAULT → **semua operasi rename/link apk gagal** ("Bad address").
+  Perbaikan: `path_argidx` = 1 untuk `renameat`/`renameat2`/`linkat`, 1 untuk `symlink`,
+  2 untuk `symlinkat` (rename/link tetap 0). Ini **temuan terpenting seluruh review**
+  (bug laten yang hampir tak kelihatan — hanya kena program yang banyak pakai renameat/linkat).
+- **Limitasi 1 — db apk (bukan bug kita):** akhir commit db memakai
+  `linkat(AT_EMPTY_PATH=0x400, /proc/self/fd/N, ...)` yang butuh `CAP_DAC_READ_SEARCH`
+  → EPERM rootless → "failed to write database: Permission denied" (rc=2). **Terbukti
+  inherent**: kontrol `apk --root $R ... add ncurses` vanila (semua syscall passthrough,
+  tanpa rewrite) gagal PERSIS sama.
+- **Limitasi 2 — skrip trigger:** `execve` skrip shebang (`#!/bin/sh`) dijalankan KERNEL;
+  interpreter `/bin/sh` host = bionic `/system/bin/sh` yang **TIDAK BISA link di child
+  kita** (CANNOT LINK libc.so — bionic butuh `/linkerconfig/ld.config.txt` namespace yang
+  tak tersedia di proses non-zygote; terbukti juga bionic manapun di bawah svsp gagal,
+  bahkan yang disalin ke dalam base). Workaround sah: `--no-scripts` (data instalasi utuh).
+- **Binary baru hasil apk:** `PT_INTERP`-nya mentah (`/lib/ld-musl-aarch64.so.1` host tak
+  ada) → jalankan via jalur cepat (loader dipanggil eksplisit, INTERP tak relevan) —
+  sekarang berfungsi berkat `LD_LIBRARY_PATH` wadah (temuan di bawah). Setelah
+  `patchelf --set-interpreter` (seperti bootstrap), bisa juga via `--svsp`.
+- **Bug `fake-run` (2, ditemukan lewat 6.5):** (1) cabang LD_PRELOAD tidak men-set
+  `LD_LIBRARY_PATH=$BASE/lib:$BASE/usr/lib` → binary multi-lib (tput/infocmp) gagal
+  memuat `libncursesw.so.6`; (2) cabang svsp tidak men-set HOME/PATH/TMPDIR/PWD/USER
+  (paritas env dengan jalur cepat hilang) → kini keduanya set identik.
+- **Jalankan native:** `fake-run --base=$R $R/usr/bin/tput cols` → `80` rc=0;
+  `infocmp xterm` → baca terminfo dari `/etc/terminfo/x/xterm` dalam wadah ✓.
+- **Catatan mode:** binary DINAMIS yang kena syscall diblokir seccomp luar (Android)
+  dapat SIGSYS di bawah `--svsp` (tanpa shim) → gunakan jalur cepat (default untuk
+  dinamis); `--svsp` untuk statis. Not angka bug.
+
+(b) **Claude Code — SESI NYATA di wadah:** `--version` → `2.1.291 (Claude Code)` rc=0;
+`--help` → usage rc=0; **TUI terbuka** (via pty: `Welcome to Claude Code v2.1.291 ...
+Checking connectivity...`); config **terbukti terisolasi**: `$R/root/.claude/{projects,
+sessions}` dibuat oleh claude, `~/.claude` host tak tersentuh. Syarat: pratinstal
+`/usr/bin/claude` hasil `patchelf` DICOPY KE DALAM base — claude melakukan self re-exec
+dengan path absolutnya sendiri; path di luar base di-rewrite ke dalam wadah (semantik
+isolasi yang benar) → ENOENT bila claude hidup di luar. Ini perilaku yang diharapkan,
+bukan bug.
 
 ---
 
@@ -223,6 +306,14 @@ mengemulasi via `*at`). `readlink=89` memang ada di arm64.
 - Program yang memblokir SIGSYS butuh loader patched (`ld-musl-patched.so.1`) — itu
   kenapa bootstrap mem-patch byte loader (7 situs → `mov w0,#0; ret`) dengan verifikasi
   SHA sebelum/sesudah.
+- **Bionic (host) TIDAK BISA berjalan di bawah `svsp`** maupun sebagai interpreter
+  shebang (`#!/bin/sh` → `/system/bin/sh` → CANNOT LINK libc.so — namespace
+  `/linkerconfig/ld.config.txt` tak tersedia di child non-zygote). Wadah ini **musl-only**;
+  skrip trigger apk memakai shebang ini → gunakan `--no-scripts`.
+- **Binary dinamis multi-lib** (tput, infocmp, dsb.) butuh `LD_LIBRARY_PATH=$BASE/lib:
+  $BASE/usr/lib` (sudah diset oleh `fake-run`); binary hasil `apk add` punya PT_INTERP
+  mentah → jalankan via jalur cepat, atau `patchelf --set-interpreter` dulu untuk `--svsp`.
+- Build final `svsp` **bersih dari print diagnostik** (hanya `DBG` ter-guard `SVSP_DEBUG`).
 
 ### Loader & INTERP
 - **JANGAN kembali ke appending manual PT_INTERP** (kernel aarch64 menolak
@@ -266,7 +357,18 @@ cd ~/Brainstorming/examples && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o
 cp gobukti $R/usr/bin/gobukti
 env -u LD_PRELOAD timeout 60 $FR --base=$R $R/usr/bin/gobukti                 # rewrite + ENOENT + rc=0
 # Claude Code
-env -u LD_PRELOAD timeout 60 $FR --base=$R $HOME/musl-test/package/claude --version  # 2.1.291
+cp $HOME/musl-test/package/claude $R/usr/local/bin/claude   # WAJIB di dalam wadah (self re-exec)
+patchelf --set-interpreter $R/lib/ld-musl-patched.so.1 $R/usr/local/bin/claude
+env -u LD_PRELOAD timeout 60 $FR --base=$R $R/usr/local/bin/claude --version  # 2.1.291
+env -u LD_PRELOAD $FR --base=$R $R/usr/local/bin/claude --help                # usage rc=0
+# isolasi config (bukti): setelah run, $R/root/.claude/{projects,sessions} ADA
+# ncurses asli (hasil apk add --no-scripts; jalur cepat, INTERP tak relevan)
+env -u LD_PRELOAD $FR --base=$R $R/usr/bin/tput cols        # 80
+env -u LD_PRELOAD $FR --base=$R $R/usr/bin/infocmp xterm    # terminfo wadah
+# apk add nyata (instalasi sukses; db-commit EPERM = limitasi apk-tools rootless, lihat §6.5)
+env -u LD_PRELOAD timeout 300 $FR --svsp --base=$R $R/sbin/apk add --no-scripts --no-cache ncurses
+# openat2 = SIGSYS eksternal Android (buktikan: st=31, TANPA notif nr=437 sama sekali)
+cp examples/o2test.c /tmp/opencode/ 2>/dev/null; cp examples/o2test.c $R/usr/bin/ 2>/dev/null
 ```
 
 `eptest` (repro epoll, sudah ada di `$R/usr/bin/eptest`): jalankan `svsp --base=$R $R/usr/bin/eptest` → baris `epoll_ctl = 0` (sebelum fix: `-1 errno=14`).
@@ -327,3 +429,29 @@ di depan fake-run saat tes.
   - **6.3**: zombie/grandchild cleanup: `SIGCHLD` handler + `waitpid(-1, WNOHANG)` di loop poll svsp.
   - **6.4**: cache rewrite FNV-1a (512 entri) + reorder rules BPF (openat/newfstatat/statx di depan).
   - **6.5**: perlu device nyata (Termux aarch64) untuk `apk add` + Claude sesi.
+- **Review + penyelesaian arena (2026-10-07, sesi `ses_eedd596b2ffeZjy2ArmIlOPnjW`)**:
+  - **Cacat bawaan arena pada `svsp.c`:** tidak bisa build (`struct open_how` redefined →
+    solusi `__has_include(<linux/openat2.h>)`); rc selalu 1 (`while(waitpid(-1,...))`
+    me-reap target → status exit hilang) → fix `waitpid(pid,...)` utk target + `tst`;
+    cache 256B → **4096 + skip store path ≥ 4095** (cegah pemotongan).
+  - **Bug nyata ditemukan lewat uji 6.5(a) (`apk add`) — PALING PENTING:** `path_argidx()`
+    default 0 → `renameat`/`renameat2`/`linkat` (dan path `symlink`/`symlinkat`) membaca
+    dirfd sebagai pointer path → EFAULT → "Bad address" pada semua commit apk. Fix:
+    `path_argidx` = 1 utk renameat/renameat2/linkat, 1 utk symlink, 2 utk symlinkat
+    (rename/link tetap 0). Plus `read_string()` page-bounded (4K) & `open_how`
+    page-bounded.
+  - **`libfakeroot.c`:** hapus `#include <linux/stat.h>` (tidak ada di minirootfs musl-dev);
+    verifikasi `_GNU_SOURCE` + `sys/stat.h` cukup untuk `statx`.
+  - **`fake-run` (2 bug):** cabang LD_PRELOAD tanpa `LD_LIBRARY_PATH=$BASE/lib:$BASE/usr/lib`
+    (binary multi-lib gagal) + cabang svsp tanpa HOME/PATH/TMPDIR/PWD/USER (paritas env).
+  - **6.5(a) `apk add`:** instalasi sukses (3 paket + 19 pkg total, symlink benar); db-commit
+    EPERM = limitasi **apk-tools rootless** (linkat `AT_EMPTY_PATH` butuh CAP_DAC_READ_SEARCH,
+    terbukti via kontrol `apk --root` vanila); trigger shebang tak jalan (bionic `/bin/sh`
+    tak bisa link di child — wadah musl-only) → `--no-scripts`.
+  - **6.5(b) Claude:** `--version`/`--help` rc=0, **TUI terbuka** di wadah (pty), config
+    terisolasi di `$R/root/.claude`; prasyarat binary di-dalam base (self re-exec).
+  - **6.1 on-device:** `examples/o2test.c` membuktikan `openat2` di-SIGSYS seccomp eksternal
+    Android sebelum NOTIF (st=31, 0 notif nr=437) → kode benar, **tak dapat diverifikasi
+    on-device** (satu-satunya limitasi yang tak bisa dipaksa).
+  - Merge `c7d6ccb0-brainstorming` via `--no-ff` (`2b135d3`) + commit akhir penyelesaian
+    (belum di-push saat dokumen ditulis).

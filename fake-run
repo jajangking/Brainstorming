@@ -101,6 +101,12 @@ if [ "$MODE" = svsp ]; then
     exec env -i \
       -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
       FAKE_BASE="$HOME_BASE" \
+      PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
+      HOME="$HOME_BASE/root" \
+      TMPDIR="$HOME_BASE/tmp" \
+      PWD="$HOME_BASE" \
+      USER=root LOGNAME=root SHELL=/bin/sh \
       TERM="${TERM:-xterm-256color}" \
       ${extra_env[@]+"${extra_env[@]}"} \
       "$SVSP" --base="$HOME_BASE" "$host" "$@"
@@ -115,6 +121,7 @@ exec env -i \
   LD_PRELOAD="$SHIM" \
   FAKE_BASE="$HOME_BASE" \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
   HOME="$HOME_BASE/root" \
   TMPDIR="$HOME_BASE/tmp" \
   PWD="$HOME_BASE" \

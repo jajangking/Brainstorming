@@ -65,16 +65,24 @@
 #define SYS_readlink 89
 #endif
 
-/* openat2: arm64 SYS=437; struct open_how { u64 flags; u64 mode; u64 resolve; } */
+/* openat2: arm64 SYS=437 (asm-generic); pastikan angka TIDAK pernah
+ * ditebak-tebak — 437 terverifikasi (lih. HANDOFF.md). struct open_how
+ * resmi dari <linux/openat2.h> (bionic/glibc punya); fallback manual
+ * hanya bila header tak tersedia — JANGAN define ulang bila sudah ada. */
 #ifndef SYS_openat2
 #define SYS_openat2 437
 #endif
 #ifndef HAVE_STRUCT_OPEN_HOW
+#if defined(__has_include) && __has_include(<linux/openat2.h>)
+#include <linux/openat2.h>
+#define HAVE_STRUCT_OPEN_HOW 1
+#else
 struct open_how {
     __u64 flags;
     __u64 mode;
     __u64 resolve;
 };
+#endif
 #endif
 
 #define DBG(...) do { if (svsp_debug) { fprintf(stderr, "[svsp] " __VA_ARGS__); } } while (0)
@@ -95,13 +103,28 @@ static ssize_t write_mem(pid_t pid, void *addr, const void *buf, size_t len) {
     return process_vm_writev(pid, &lo, 1, &ro, 1, 0);
 }
 
-/* baca string hingga max, kembalikan panjang (tiada NUL -> -1) */
+/* baca string hingga max, kembalikan panjang (tiada NUL -> -1).
+ * PENTING: baca PER-HALAMAN (batas 4K). process_vm_readv yang meminta
+ * byte melewati akhiran mapping child (mis. string di ujung heap/stack,
+ * persis seperti path kedua renameat/linkat milik apk) gagal EFAULT
+ * "Bad address" walau stringnya utuh — baca berhenti di batas halaman,
+ * lanjut ke halaman berikutnya hanya bila NUL belum ditemukan. */
 static ssize_t read_string(pid_t pid, void *addr, char *buf, size_t max) {
-    ssize_t n = read_mem(pid, addr, buf, max);
-    if (n < 0) return -1;
-    char *nul = memchr(buf, 0, (size_t)n);
-    if (!nul) return -1;
-    return nul - buf;
+    size_t off = 0;
+    while (off < max) {
+        size_t page_rem = 4096 - ((uintptr_t)addr + off) % 4096;
+        size_t chunk = max - off;
+        if (chunk > page_rem) chunk = page_rem;
+        ssize_t n = read_mem(pid, (void *)((uintptr_t)addr + off), buf + off, chunk);
+        if (n < 0) {
+            char *nul = memchr(buf, 0, off); /* yg sudah terbaca masih sah */
+            return nul ? (ssize_t)(nul - buf) : -1;
+        }
+        off += (size_t)n;
+        char *nul = memchr(buf + off - (size_t)n, 0, (size_t)n);
+        if (nul) return (ssize_t)(nul - buf);
+    }
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,8 +283,8 @@ static int build_filter(struct sock_filter **out, __u16 *out_len) {
 struct cache_entry {
     __u64 hash;             /* FNV-1a hash of input path */
     int   changed;          /* 1 if rewritten, 0 if passthrough */
-    char  out[256];         /* cached output path */
-    char  in[256];          /* cached input path (for collision check) */
+    char  out[4096];        /* cached output path (samakan dgn pbuf) */
+    char  in[4096];         /* cached input path (for collision check) */
     int   valid;
 };
 static struct cache_entry rewrite_cache[CACHE_SIZE];
@@ -286,6 +309,11 @@ static int cache_lookup(const char *in, char *out, size_t outsz, int *changed) {
 static void cache_store(const char *in, const char *out, int changed) {
     __u64 h = fnv1a(in);
     struct cache_entry *e = &rewrite_cache[h & CACHE_MASK];
+    /* cache harus setia pada path asli: bila snprintf bakal memotong
+     * (path > ~4095 byte), jangan simpan — rewrite ulang lebih aman
+     * daripada cache yg diam-diam mengubah arti path. */
+    if (strlen(in) >= sizeof e->in || strlen(out) >= sizeof e->out)
+        return;
     e->hash = h;
     e->changed = changed;
     snprintf(e->in, sizeof e->in, "%s", in);
@@ -323,6 +351,29 @@ static int path_argidx(long nr) {
     case SYS_statx:
 #endif
         return 1;
+    /* rename/link-*: (dirfd, oldpath, dirfd, newpath[, flags]) —
+     * path pertama di arg[1]; JANGAN default-0 (a[0] = dirfd!) */
+#ifdef SYS_renameat
+    case SYS_renameat:
+#endif
+#ifdef SYS_renameat2
+    case SYS_renameat2:
+#endif
+#ifdef SYS_linkat
+    case SYS_linkat:
+        return 1;
+#endif
+    /* symlink: (target, linkpath) — yang di-rewrite = linkpath (a[1]) */
+#ifdef SYS_symlink
+    case SYS_symlink:
+        return 1;
+#endif
+    /* symlinkat: (target, newdirfd, linkpath) — linkpath di arg[2] */
+#ifdef SYS_symlinkat
+    case SYS_symlinkat:
+        return 2;
+#endif
+    /* rename/link lama: (oldpath, newpath) — oldpath di arg[0] = default */
     default:
         return 0;
     }
@@ -366,9 +417,19 @@ static void handle(int listener, const struct seccomp_notif *req) {
 #ifdef SYS_openat2
         if (nr == SYS_openat2) {
             struct open_how how;
-            if (read_mem(pid, (void *)(uintptr_t)a[2], &how, sizeof how) < 0) {
-                send_resp(listener, req->id, 0, -EFAULT, 0); break;
+            /* baca 24 byte dgn batas halaman (hindari EFAULT overread
+             * bila struct di ujung mapping) */
+            size_t oo = 0, need = sizeof how;
+            char *dst = (char *)&how;
+            int rbad = 0;
+            while (oo < need) {
+                size_t page_rem = 4096 - ((uintptr_t)a[2] + oo) % 4096;
+                size_t chunk = need - oo;
+                if (chunk > page_rem) chunk = page_rem;
+                if (read_mem(pid, (void *)((uintptr_t)a[2] + oo), dst + oo, chunk) < 0) { rbad = 1; break; }
+                oo += chunk;
             }
+            if (rbad) { send_resp(listener, req->id, 0, -EFAULT, 0); break; }
             fd = syscall(SYS_openat2, AT_FDCWD, pout, &how, (size_t)a[3]);
         } else
 #endif
@@ -717,16 +778,15 @@ int main(int argc, char **argv) {
     if (listener < 0) { fprintf(stderr, "svsp: tak dapat listener\n"); return 2; }
     DBG("listener=%d target_pid=%d base=%s\n", listener, (int)pid, base);
 
-    /* SIGCHLD: reap grandchild zombies */
-    {
-        struct sigaction sa_chld = { .sa_handler = SIG_DFL };
-        sigemptyset(&sa_chld.sa_mask);
-        sigaction(SIGCHLD, &sa_chld, NULL);
-    }
-
+    /*
+     * Cucu target BUKAN anak svsp — hanya TARGET yg bisa di-wait oleh svsp.
+     * Zombie cucu = tanggung jawab proses target (normal, sama seperti
+     * tanpa supervisor). SVSP hanya boleh merawat target + exit code-nya.
+     * Jangan pernah waitpid(-1): satu-satunya anak svsp adalah target,
+     * mereapnya duluan = status exit hilang (regresi rc selalu 1).
+     */
+    int tst = -1;   /* status target yg direap di loop (utk exit code) */
     for (;;) {
-        /* reap any zombie grandchildren */
-        while (waitpid(-1, NULL, WNOHANG) > 0) {}
         /* poll dgn batas waktu: kernel Android ini TIDAK membangunkan RECV
          * yang terblokir saat target mati -> deteksi via waitpid(WNOHANG) */
         struct pollfd pf = { .fd = listener, .events = POLLIN };
@@ -737,10 +797,13 @@ int main(int argc, char **argv) {
         }
         if (pr == 0) {
             int st;
-            if (waitpid(pid, &st, WNOHANG) == pid) {
+            pid_t r = waitpid(pid, &st, WNOHANG);
+            if (r == pid) {
+                tst = st;                  /* simpan utk exit code */
                 DBG("target %d hilang (st=%d)\n", (int)pid, st);
                 break;                     /* child sudah keluar */
             }
+            if (r < 0 && errno == ECHILD) break;   /* sudah keluar? aman berhenti */
             continue;                      /* masih hidup, tunggu notif */
         }
         struct seccomp_notif req; memset(&req, 0, sizeof req);
@@ -751,10 +814,15 @@ int main(int argc, char **argv) {
         }
         handle(listener, &req);
     }
-    /* propagate child exit code */
+    /* propagate child exit code: preferensi status yg direap di loop;
+     * fallback tunggu target bila loop keluar lewat RECV-ENOENT */
     {
-        int st;
-        if (waitpid(pid, &st, 0) >= 0) {
+        int st = tst;
+        if (st < 0) {
+            pid_t r = waitpid(pid, &st, 0);
+            if (r < 0) st = tst;           /* ECHILD — status tak tersedia */
+        }
+        if (st >= 0) {
             if (WIFEXITED(st)) { free(f); return WEXITSTATUS(st); }
             if (WIFSIGNALED(st)) { free(f); return 128 + WTERMSIG(st); }
         }

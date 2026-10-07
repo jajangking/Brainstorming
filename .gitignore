@@ -3,7 +3,12 @@
 *.o
 svsp
 pinterp
+examples/gobukti
+examples/ebench
+examples/o2test
+examples/eptest
 
 # lingkungan wadah — bukan sumber proyek (besar)
 alpine-rootfs/
 alpine-minirootfs.tar.gz
+musl-dev-cache.apk

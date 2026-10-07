@@ -135,7 +135,6 @@ int fstatat(int dirfd, const char *p, struct stat *s, int fl) {
     return CALL(fstatat, dirfd, p, s, fl);
 }
 #ifdef SYS_statx
-#include <linux/stat.h>
 int statx(int dirfd, const char *p, int flags, unsigned int mask, struct statx *stx) {
     NEXT(statx);
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(statx, dirfd, b, flags, mask, stx); }
