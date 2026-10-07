@@ -1,0 +1,663 @@
+/*
+ * svsp.c — supervisor seccomp USER_NOTIF (fake-chroot level kernel)
+ *
+ * Menutup celah LD_PRELOAD: binary statis & syscall mentah.
+ *
+ * Arsitektur:
+ *   - child: prctl(NO_NEW_PRIVS) + filter seccomp (NEW_LISTENER) utk syscall
+ *     path -> RET_USER_NOTIF; kirim listener fd ke parent via socketpair
+ *     SCM_RIGHTS; lalu exec target (filter diwariskan ke binary apa pun,
+ *     statis sekalipun).
+ *   - parent (tanpa filter): melayani notifikasi; path absolut di-rewrite ke
+ *     FAKE_BASE; hasilnya dieksekusi sendiri (ekivalen: namespace sama) atau
+ *     via ADDFD (open), atau rewrite-memori+CONTINUE (execve/chdir).
+ *
+ * Aturan rewrite:
+ *   - /dev|/proc|/sys*  -> passthrough (host)
+ *   - sudah di bawah base -> passthrough
+ *   - absolut lainnya   -> base + path
+ *   - relatif           -> passthrough (cwd child = base)
+ *   Jika rewrite menghasilkan string sama -> CONTINUE (jalankan native di
+ *   child, hemat round-trip; /proc/self benar utk child).
+ *
+ * Susunan BPF arch-check yang benar (bug klasik jt/jf):
+ *   LD arch; JEQ(AUDIT_ARCH_AARCH64, jt=1, jf=0); RET KILL
+ *   -> match: lompati KILL (lanjut); mismatch: jatuh ke KILL.
+ *
+ * Compile (host/bionic):
+ *   clang -O2 -o svsp svsp.c
+ * Pakai:
+ *   svsp --base=$ROOTFS $ROOTFS/lib/ld-musl-patched.so.1 $ROOTFS/bin/busybox cat /etc/os-release
+ *   svsp --base=$ROOTFS /path/ke/binary-STATIS arg...
+ * Env: SVSP_DEBUG=1 utk log layanan.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <linux/types.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef SYS_rmdir
+#define SYS_rmdir 21
+#endif
+#ifndef SYS_readlink
+#define SYS_readlink 89
+#endif
+
+#define DBG(...) do { if (svsp_debug) { fprintf(stderr, "[svsp] " __VA_ARGS__); } } while (0)
+
+static int svsp_debug = 0;
+static char *base;              /* FAKE_BASE */
+static size_t baselen;
+
+/* ------------------------------------------------------------------ */
+/* memori remote (child)                                               */
+/* ------------------------------------------------------------------ */
+static ssize_t read_mem(pid_t pid, void *addr, void *buf, size_t len) {
+    struct iovec lo = { buf, len }, ro = { addr, len };
+    return process_vm_readv(pid, &lo, 1, &ro, 1, 0);
+}
+static ssize_t write_mem(pid_t pid, void *addr, const void *buf, size_t len) {
+    struct iovec lo = { (void *)buf, len }, ro = { addr, len };
+    return process_vm_writev(pid, &lo, 1, &ro, 1, 0);
+}
+
+/* baca string hingga max, kembalikan panjang (tiada NUL -> -1) */
+static ssize_t read_string(pid_t pid, void *addr, char *buf, size_t max) {
+    ssize_t n = read_mem(pid, addr, buf, max);
+    if (n < 0) return -1;
+    char *nul = memchr(buf, 0, (size_t)n);
+    if (!nul) return -1;
+    return nul - buf;
+}
+
+/* ------------------------------------------------------------------ */
+/* rewrite path                                                         */
+/* ------------------------------------------------------------------ */
+static int passthrough(const char *p) {
+    return p[0] != '/'                    /* relatif: resolve di child  */
+        || !strncmp(p, "/dev/", 5) || !strcmp(p, "/dev")
+        || !strncmp(p, "/proc/", 6) || !strcmp(p, "/proc")
+        || !strncmp(p, "/sys/", 5) || !strcmp(p, "/sys")
+        || (baselen && strncmp(p, base, baselen) == 0);
+}
+
+/* tulis hasil rewrite ke out; return 1 jika berubah, 0 jika sama */
+static int rewrite(const char *in, char *out, size_t outsz) {
+    if (passthrough(in) || in[0] != '/') {
+        snprintf(out, outsz, "%s", in);
+        return 0;
+    }
+    snprintf(out, outsz, "%s%s", base, in);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* kelas syscall                                                        */
+/* ------------------------------------------------------------------ */
+enum { C_OPEN = 1, C_STAT, C_STATX, C_STATFS, C_EXEC, C_READLINK,
+       C_SIDE, C_CHDIR };
+
+struct rule { int cls; long nr; };
+static struct rule rules[] = {
+    { C_OPEN,      SYS_openat      },
+    { C_EXEC,      SYS_execve      },
+#ifdef SYS_execveat
+    { C_EXEC,      SYS_execveat    },
+#endif
+#ifdef SYS_statx
+    { C_STATX,     SYS_statx       },
+#endif
+    { C_STAT,      SYS_newfstatat  },
+#ifdef SYS_statfs
+    { C_STATFS,    SYS_statfs      },
+#endif
+    { C_CHDIR,     SYS_chdir       },
+#ifdef SYS_mkdir
+    { C_SIDE,      SYS_mkdir       },
+#endif
+    { C_SIDE,      SYS_mkdirat     },
+    { C_SIDE,      SYS_rmdir       },
+#ifdef SYS_unlink
+    { C_SIDE,      SYS_unlink      },
+#endif
+    { C_SIDE,      SYS_unlinkat    },
+#ifdef SYS_rename
+    { C_SIDE,      SYS_rename      },
+#endif
+#ifdef SYS_renameat
+    { C_SIDE,      SYS_renameat    },
+#endif
+#ifdef SYS_renameat2
+    { C_SIDE,      SYS_renameat2   },
+#endif
+#ifdef SYS_link
+    { C_SIDE,      SYS_link        },
+#endif
+#ifdef SYS_linkat
+    { C_SIDE,      SYS_linkat      },
+#endif
+#ifdef SYS_symlink
+    { C_SIDE,      SYS_symlink     },
+#endif
+#ifdef SYS_symlinkat
+    { C_SIDE,      SYS_symlinkat   },
+#endif
+    { C_READLINK,  SYS_readlink    },
+    { C_READLINK,  SYS_readlinkat  },
+#ifdef SYS_access
+    { C_SIDE,      SYS_access      },
+#endif
+    { C_SIDE,      SYS_faccessat   },
+#ifdef SYS_faccessat2
+    { C_SIDE,      SYS_faccessat2  },
+#endif
+#ifdef SYS_chmod
+    { C_SIDE,      SYS_chmod       },
+#endif
+    { C_SIDE,      SYS_fchmodat    },
+#ifdef SYS_fchmodat2
+    { C_SIDE,      SYS_fchmodat2   },
+#endif
+#ifdef SYS_chown
+    { C_SIDE,      SYS_chown       },
+#endif
+#ifdef SYS_lchown
+    { C_SIDE,      SYS_lchown      },
+#endif
+    { C_SIDE,      SYS_fchownat    },
+#ifdef SYS_truncate
+    { C_SIDE,      SYS_truncate    },
+#endif
+    { C_SIDE,      SYS_utimensat   },
+#ifdef SYS_utimes
+    { C_SIDE,      SYS_utimes      },
+#endif
+#ifdef SYS_mknod
+    { C_SIDE,      SYS_mknod       },
+#endif
+    { C_SIDE,      SYS_mknodat     },
+};
+
+static int cls_of(long nr) {
+    for (size_t i = 0; i < sizeof rules / sizeof rules[0]; i++)
+        if (rules[i].nr == nr) return rules[i].cls;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* BPF                                                                */
+/* ------------------------------------------------------------------ */
+static int build_filter(struct sock_filter **out, __u16 *out_len) {
+    size_t nrules = sizeof rules / sizeof rules[0];
+    size_t n = 4 + 2 * nrules + 1;
+    struct sock_filter *f = calloc(n, sizeof *f);
+    size_t i = 0;
+    /* arch != aarch64 -> KILL (jt=1 utk match lanjut; jf=0 jatuh ke KILL) */
+    f[i++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                                          offsetof(struct seccomp_data, arch));
+    f[i++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                          AUDIT_ARCH_AARCH64, 1, 0);
+    f[i++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL);
+    f[i++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                                          offsetof(struct seccomp_data, nr));
+    for (size_t r = 0; r < nrules; r++) {
+        f[i++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                              (unsigned)rules[r].nr, 0, 1);
+        f[i++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K,
+                                              SECCOMP_RET_USER_NOTIF);
+    }
+    f[i++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    *out = f; *out_len = (__u16)i;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* tangani satu notifikasi                                             */
+/* ------------------------------------------------------------------ */
+static void send_resp(int listener, __u64 id, __s64 val, __s32 error,
+                      __u32 flags) {
+    struct seccomp_notif_resp resp = { 0 };
+    resp.id = id; resp.val = val; resp.error = error; resp.flags = flags;
+    if (ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &resp) < 0)
+        DBG("SEND err %d\n", errno);
+}
+
+static int path_argidx(long nr) {
+    switch (nr) {
+    case SYS_openat:  case SYS_mkdirat:  case SYS_unlinkat:
+    case SYS_newfstatat: case SYS_readlinkat: case SYS_faccessat:
+    case SYS_fchmodat: case SYS_fchownat: case SYS_mknodat:
+    case SYS_utimensat:
+#ifdef SYS_faccessat2
+    case SYS_faccessat2:
+#endif
+#ifdef SYS_fchmodat2
+    case SYS_fchmodat2:
+#endif
+#ifdef SYS_statx
+    case SYS_statx:
+#endif
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void handle(int listener, const struct seccomp_notif *req) {
+    const __u64 *a = req->data.args;
+    long nr = (long)req->data.nr;
+    pid_t pid = (pid_t)req->pid;
+    int cls = cls_of(nr);
+    char pbuf[4096], pout[4096], pbuf2[4096], pout2[4096];
+    char *pathp; size_t path_aidx;
+
+    DBG(">> nr=%ld cls=%d pid=%d id=%llu\n", nr, cls, (int)req->pid, req->id);
+    if (!cls) { send_resp(listener, req->id, 0, -EPERM, 0); return; }
+
+    path_aidx = (cls == C_EXEC && nr != SYS_execve) ? 1 : path_argidx(nr);
+    pathp = (void *)(uintptr_t)a[path_aidx];
+
+    ssize_t oldlen = read_string(pid, pathp, pbuf, sizeof pbuf - 1);
+    if (oldlen < 0) { send_resp(listener, req->id, 0, -EFAULT, 0); return; }
+    pbuf[oldlen] = 0;
+
+    int changed = rewrite(pbuf, pout, sizeof pout);
+
+    /* tidak berubah -> biarkan kernel menjalankannya di child */
+    if (!changed) {
+        send_resp(listener, req->id, 0, 0, SECCOMP_USER_NOTIF_FLAG_CONTINUE);
+        return;
+    }
+    DBG("nr=%ld [%s] -> [%s]\n", nr, pbuf, pout);
+
+    switch (cls) {
+    case C_OPEN: {
+        int fd = openat(AT_FDCWD, pout, (int)a[2], (int)a[3]);
+        if (fd < 0) { send_resp(listener, req->id, 0, -errno, 0); break; }
+        struct seccomp_notif_addfd add = { 0 };
+        add.id = req->id;
+        add.flags = SECCOMP_ADDFD_FLAG_SEND;
+        add.srcfd = fd;
+        add.newfd = 0;          /* kernel pilih fd terendah di child */
+        int nfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
+        DBG("ADDFD nr=%ld -> fd=%d errno=%d\n", nr, nfd, errno);
+        if (nfd < 0)
+            send_resp(listener, req->id, 0, -EACCES, 0);
+        close(fd);
+        break;
+    }
+    case C_STAT: {
+        struct stat st;
+        if (fstatat(AT_FDCWD, pout, &st, (int)a[3]) < 0) {
+            send_resp(listener, req->id, 0, -errno, 0); break;
+        }
+        if (write_mem(pid, (void *)(uintptr_t)a[2], &st, sizeof st) < 0) {
+            send_resp(listener, req->id, 0, -EFAULT, 0); break;
+        }
+        send_resp(listener, req->id, 0, 0, 0);
+        break;
+    }
+    case C_STATX: {
+#ifdef SYS_statx
+        struct statx stx;
+        if (syscall(SYS_statx, AT_FDCWD, pout, (int)a[2], (int)a[3], &stx) < 0) {
+            send_resp(listener, req->id, 0, -errno, 0); break;
+        }
+        if (write_mem(pid, (void *)(uintptr_t)a[4], &stx, sizeof stx) < 0) {
+            send_resp(listener, req->id, 0, -EFAULT, 0); break;
+        }
+        send_resp(listener, req->id, 0, 0, 0);
+#endif
+        break;
+    }
+    case C_STATFS: {
+        struct statfs st;
+        if (statfs(pout, &st) < 0) {
+            send_resp(listener, req->id, 0, -errno, 0); break;
+        }
+        if (write_mem(pid, (void *)(uintptr_t)a[1], &st, sizeof st) < 0) {
+            send_resp(listener, req->id, 0, -EFAULT, 0); break;
+        }
+        send_resp(listener, req->id, 0, 0, 0);
+        break;
+    }
+    case C_READLINK: {
+        size_t b_idx = (nr == SYS_readlink) ? 1 : 2;
+        size_t s_idx = (nr == SYS_readlink) ? 2 : 3;
+        char tmp[4096]; size_t cap = (size_t)a[s_idx];
+        if (cap > sizeof tmp) cap = sizeof tmp;
+        ssize_t r = readlink(pout, tmp, cap);
+        if (r < 0) { send_resp(listener, req->id, 0, -errno, 0); break; }
+        if (write_mem(pid, (void *)(uintptr_t)a[b_idx], tmp, (size_t)r) < 0) {
+            send_resp(listener, req->id, 0, -EFAULT, 0); break;
+        }
+        send_resp(listener, req->id, 0, r, 0);
+        break;
+    }
+    case C_EXEC: {
+        /* rewrite path di memori child; absolut dulu, fallback relatif */
+        size_t newlen = strlen(pout);
+        const char *w;
+        if (newlen <= (size_t)oldlen) {
+            w = pout;
+        } else if (pbuf[0] == '/' && strlen(pbuf + 1) <= (size_t)oldlen) {
+            w = pbuf + 1;            /* relatif ke cwd child (awalnya base) */
+        } else {
+            /* tak muat di buffer path asli -> tak bisa rewrite */
+            DBG("execve muat tak cukup: %s\n", pout);
+            send_resp(listener, req->id, 0, -ENOENT, 0);
+            break;
+        }
+        if (write_mem(pid, pathp, w, strlen(w) + 1) < 0) {
+            /* path di memori read-only (.rodata): rewrite tak mungkin.
+             * Alternatif (ENOENT) jujur: path itu tak ada di wadah.
+             * Catatan: shell/dalang umumnya membangun string path di
+             * stack/heap (writable) sehingga tetap berfungsi. */
+            DBG("execve write_mem gagal (RO memori) nr=%ld oldlen=%zd\n", nr, oldlen);
+            send_resp(listener, req->id, 0, -ENOENT, 0); break;
+        }
+        send_resp(listener, req->id, 0, 0, SECCOMP_USER_NOTIF_FLAG_CONTINUE);
+        break;
+    }
+    case C_CHDIR: {
+        size_t newlen = strlen(pout);
+        if (newlen <= (size_t)oldlen) {
+            if (write_mem(pid, pathp, pout, newlen + 1) == 0)
+                send_resp(listener, req->id, 0, 0,
+                          SECCOMP_USER_NOTIF_FLAG_CONTINUE);
+            else
+                send_resp(listener, req->id, 0, -EFAULT, 0);
+        } else {
+            /* tak muat: no-op (cwd child tak berubah) */
+            DBG("chdir muat tak cukup: %s\n", pout);
+            send_resp(listener, req->id, 0, 0, 0);
+        }
+        break;
+    }
+    case C_SIDE: {
+        int rc;
+        switch (nr) {
+        case SYS_mkdirat:  rc = mkdirat(AT_FDCWD, pout, (mode_t)a[2]); break;
+#ifdef SYS_mkdir
+        case SYS_mkdir:    rc = mkdir(pout, (mode_t)a[1]); break;
+#endif
+        case SYS_rmdir:    rc = rmdir(pout); break;
+#ifdef SYS_unlink
+        case SYS_unlink:   rc = unlink(pout); break;
+#endif
+        case SYS_unlinkat: rc = unlinkat(AT_FDCWD, pout, (int)a[2]); break;
+#ifdef SYS_rename
+        case SYS_rename: {
+            char *o2 = (void *)(uintptr_t)a[1];
+            if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = rename(pout, pout2); break;
+        }
+#endif
+#ifdef SYS_renameat
+        case SYS_renameat: {
+            char *o2 = (void *)(uintptr_t)a[3];
+            if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = renameat(AT_FDCWD, pout, AT_FDCWD, pout2); break;
+        }
+#endif
+#ifdef SYS_renameat2
+        case SYS_renameat2: {
+            char *o2 = (void *)(uintptr_t)a[3];
+            if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = syscall(SYS_renameat2, AT_FDCWD, pout, AT_FDCWD, pout2,
+                         (int)a[4]); break;
+        }
+#endif
+#ifdef SYS_link
+        case SYS_link: {
+            char *o2 = (void *)(uintptr_t)a[1];
+            if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = link(pout, pout2); break;
+        }
+#endif
+#ifdef SYS_linkat
+        case SYS_linkat: {
+            char *o2 = (void *)(uintptr_t)a[3];
+            if (read_string(pid, o2, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = linkat(AT_FDCWD, pout, AT_FDCWD, pout2, (int)a[4]); break;
+        }
+#endif
+#ifdef SYS_symlink
+        case SYS_symlink: {
+            char *t = (void *)(uintptr_t)a[0];
+            if (read_string(pid, t, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = symlink(pout2, pout); break;
+        }
+#endif
+#ifdef SYS_symlinkat
+        case SYS_symlinkat: {
+            char *t = (void *)(uintptr_t)a[0];
+            if (read_string(pid, t, pbuf2, sizeof pbuf2 - 1) < 0) {
+                send_resp(listener, req->id, 0, -EFAULT, 0); return;
+            }
+            rewrite(pbuf2, pout2, sizeof pout2);
+            rc = symlinkat(pout2, AT_FDCWD, pout); break;
+        }
+#endif
+#ifdef SYS_access
+        case SYS_access:  rc = access(pout, (int)a[1]); break;
+#endif
+        case SYS_faccessat: rc = syscall(SYS_faccessat, AT_FDCWD, pout,
+                                         (int)a[2]); break;
+#ifdef SYS_faccessat2
+        case SYS_faccessat2: rc = syscall(SYS_faccessat2, AT_FDCWD, pout,
+                                          (int)a[2], (int)a[3]); break;
+#endif
+#ifdef SYS_chmod
+        case SYS_chmod:   rc = chmod(pout, (mode_t)a[1]); break;
+#endif
+        case SYS_fchmodat:
+            rc = fchmodat(AT_FDCWD, pout, (mode_t)a[2], (int)a[3]); break;
+#ifdef SYS_fchmodat2
+        case SYS_fchmodat2:
+            rc = syscall(SYS_fchmodat2, AT_FDCWD, pout, (mode_t)a[2],
+                         (int)a[3]); break;
+#endif
+#ifdef SYS_chown
+        case SYS_chown:   rc = chown(pout, (uid_t)a[1], (gid_t)a[2]); break;
+#endif
+#ifdef SYS_lchown
+        case SYS_lchown:  rc = lchown(pout, (uid_t)a[1], (gid_t)a[2]); break;
+#endif
+        case SYS_fchownat:
+            rc = fchownat(AT_FDCWD, pout, (uid_t)a[2], (gid_t)a[3],
+                          (int)a[4]); break;
+#ifdef SYS_truncate
+        case SYS_truncate: rc = truncate(pout, (off_t)a[1]); break;
+#endif
+        case SYS_utimensat: {
+            struct timespec ts[2];
+            if (a[2]) {
+                if (read_mem(pid, (void *)(uintptr_t)a[2], ts, sizeof ts) < 0) {
+                    send_resp(listener, req->id, 0, -EFAULT, 0); return;
+                }
+                rc = utimensat(AT_FDCWD, pout, ts, (int)a[3]);
+            } else rc = utimensat(AT_FDCWD, pout, NULL, (int)a[3]);
+            break;
+        }
+#ifdef SYS_utimes
+        case SYS_utimes: {
+            struct timeval tv[2];
+            if (a[1]) {
+                if (read_mem(pid, (void *)(uintptr_t)a[1], tv, sizeof tv) < 0) {
+                    send_resp(listener, req->id, 0, -EFAULT, 0); return;
+                }
+                rc = utimes(pout, tv);
+            } else rc = utimes(pout, NULL);
+            break;
+        }
+#endif
+#ifdef SYS_mknod
+        case SYS_mknod:   rc = mknod(pout, (mode_t)a[1], (dev_t)a[2]); break;
+#endif
+        case SYS_mknodat:
+            rc = mknodat(AT_FDCWD, pout, (mode_t)a[2], (dev_t)a[3]); break;
+        default:           rc = -1; errno = ENOSYS;
+        }
+        send_resp(listener, req->id, 0, rc ? -errno : 0, 0);
+        break;
+    }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* main                                                                 */
+/* ------------------------------------------------------------------ */
+int main(int argc, char **argv) {
+    svsp_debug = getenv("SVSP_DEBUG") != NULL;
+
+    int i = 1;
+    while (i < argc && strncmp(argv[i], "--", 2) == 0) {
+        if (!strncmp(argv[i], "--base=", 7)) base = argv[i] + 7;
+        i++;
+    }
+    if (!base) base = getenv("FAKE_BASE");
+    if (!base || !*base) { fprintf(stderr, "svsp: butuh --base=DIR\n"); return 2; }
+    baselen = strlen(base);
+
+    if (i >= argc) { fprintf(stderr, "svsp: butuh program\n"); return 2; }
+    char *prog = argv[i];
+
+    if (chdir(base) < 0) { fprintf(stderr, "svsp: chdir %s: %s\n", base,
+                                   strerror(errno)); return 2; }
+
+    /* env ala wadah */
+    setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+    {
+        char h[4096]; snprintf(h, sizeof h, "%s/root", base);
+        setenv("HOME", h, 1);
+        snprintf(h, sizeof h, "%s/tmp", base);
+        setenv("TMPDIR", h, 1);
+    }
+    setenv("PWD", base, 1);
+    setenv("USER", "root", 1); setenv("LOGNAME", "root", 1);
+    setenv("SHELL", "/bin/sh", 1);
+    setenv("FAKE_BASE", base, 1);
+    unsetenv("LD_PRELOAD"); unsetenv("LD_LIBRARY_PATH"); unsetenv("LD_PRELOAD_32");
+
+    struct sock_filter *f; __u16 flen;
+    build_filter(&f, &flen);
+    struct sock_fprog prog_f = { .len = flen, .filter = f };
+
+    int sp[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sp) < 0) {
+        perror("socketpair"); return 2;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) { perror("fork"); return 2; }
+
+    if (pid == 0) {
+        /* child: pasang filter, kirim listener, exec target */
+        close(sp[0]);
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) _exit(126);
+        long lfd = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+                           SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog_f);
+        if (lfd < 0) { fprintf(stderr, "svsp(child): seccomp: %s\n",
+                               strerror(errno)); _exit(126); }
+        int listener = (int)lfd;
+
+        struct { struct cmsghdr cm; int fd; } ctl = { 0 };
+        struct msghdr mh = { 0 };
+        struct iovec iov; char byte = 'L';
+        iov.iov_base = &byte; iov.iov_len = 1;
+        mh.msg_iov = &iov; mh.msg_iovlen = 1;
+        mh.msg_control = &ctl; mh.msg_controllen = sizeof ctl;
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+        cm->cmsg_level = SOL_SOCKET; cm->cmsg_type = SCM_RIGHTS;
+        cm->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cm), &listener, sizeof(int));
+        mh.msg_controllen = cm->cmsg_len;
+        if (sendmsg(sp[1], &mh, 0) < 0) _exit(126);
+        close(sp[1]);
+
+        execv(prog, &argv[i]);
+        fprintf(stderr, "svsp(child): exec %s: %s\n", prog, strerror(errno));
+        _exit(127);
+    }
+
+    /* parent: terima listener lalu layani */
+    close(sp[1]);
+    int listener = -1;
+    char byte; struct iovec iov = { &byte, 1 };
+    struct { struct cmsghdr cm; int fd; } ctl = { 0 };
+    struct msghdr mh = { 0 };
+    mh.msg_iov = &iov; mh.msg_iovlen = 1;
+    mh.msg_control = &ctl; mh.msg_controllen = sizeof ctl;
+    if (recvmsg(sp[0], &mh, 0) < 0) { perror("recvmsg"); return 2; }
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    if (cm && cm->cmsg_type == SCM_RIGHTS)
+        memcpy(&listener, CMSG_DATA(cm), sizeof(int));
+    close(sp[0]);
+    if (listener < 0) { fprintf(stderr, "svsp: tak dapat listener\n"); return 2; }
+    DBG("listener=%d target_pid=%d base=%s\n", listener, (int)pid, base);
+
+    for (;;) {
+        /* poll dgn batas waktu: kernel Android ini TIDAK membangunkan RECV
+         * yang terblokir saat target mati -> deteksi via waitpid(WNOHANG) */
+        struct pollfd pf = { .fd = listener, .events = POLLIN };
+        int pr = poll(&pf, 1, 200);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            DBG("poll err %d\n", errno); break;
+        }
+        if (pr == 0) {
+            int st;
+            if (waitpid(pid, &st, WNOHANG) == pid) {
+                DBG("target %d hilang (st=%d)\n", (int)pid, st);
+                break;                     /* child sudah keluar */
+            }
+            continue;                      /* masih hidup, tunggu notif */
+        }
+        struct seccomp_notif req; memset(&req, 0, sizeof req);
+        if (ioctl(listener, SECCOMP_IOCTL_NOTIF_RECV, &req) < 0) {
+            if (errno == ENOENT) break;   /* target hilang */
+            if (errno == EINTR) continue;
+            DBG("RECV err %d\n", errno); break;
+        }
+        handle(listener, &req);
+    }
+    waitpid(pid, NULL, 0);
+    return 0;
+}

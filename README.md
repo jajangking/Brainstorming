@@ -13,6 +13,7 @@ secara **native** di Termux/Android tanpa root, tanpa proot — termasuk **isola
 | Isolasi path tanpa chroot | LD_PRELOAD fakechroot: rewrite path absolut + env ala chroot (`fake-run`) |
 | Antarmuka `/proc`, `/dev`, `/sys` | Passthrough symlink ke host |
 | Claude Code (bun, musl) di dalam wadah | Jalan native: versi, config terisolasi di rootfs, jaringan aman |
+| **Binary statis (tanpa loader) & syscall mentah yang mem-bypass LD_PRELOAD** | **Supervisor `SECCOMP_RET_USER_NOTIF` (`svsp`): filter kernel tambahan (komposisional), parent bebas-filter me-rewrite path di kernel — bukti: `st2` statik (no loader) + `bossv` (statik → fork → exec `sh` dinamis) jalan native; `/system/build.prop` → ENOENT** |
 
 ## Isi
 
@@ -24,6 +25,7 @@ secara **native** di Termux/Android tanpa root, tanpa proot — termasuk **isola
 - `block-trap.c` — bukti TRAP-while-SIGSYS-blocked = kill instan
 - `raw-rt-sig.c` — resep handler SIGSYS dengan layout `sigaction` kernel (bionic)
 - `fake-run` — wrapper wadah palsu (rewrite env, resolve program, jalankan via loader musl)
+- `svsp.c` — supervisor `SECCOMP_RET_USER_NOTIF` (TAHAP 3): child pasang filter sendiri (`NO_NEW_PRIVS` + `NEW_LISTENER`), listener dikirim ke parent bebas-filter via SCM_RIGHTS; openat/stat/statx/statfs/readlink/execve/chdir/mkdir/unlink/rename/link/symlink/chmod/chown/truncate/utimensat/access/dll. di-rewrite `base+path` → eksekusi parent + `ADDFD`/`process_vm_writev`/memori-rewrite+`CONTINUE`. Menutup binary statis & syscall raw tanpa LD_PRELOAD.
 
 ## Reproduksi (ringkas)
 
@@ -39,11 +41,18 @@ clang --target=aarch64-alpine-linux-musl --sysroot=$ROOTFS \
 ./fake-run cat /etc/os-release          # -> Alpine, bukan host
 ./fake-run cat /system/build.prop      # -> ENOENT (isolasi terbukti)
 ./fake-run --loader=.../ld-musl...so.1 .../claude-bin --version   # Claude di dalam wadah
+
+# 6) TAHAP 3: supervisor USER_NOTIF (tanpa LD_PRELOAD, untuk binary statis/syscall raw)
+clang -O2 -o svsp svsp.c
+#   rootfs perlu libc.a + crt*.o untuk membangun binary statis musl (opsional)
+env -u LD_PRELOAD ./svsp --base=$ROOTFS $ROOTFS/bin/busybox cat /etc/os-release   # -> Alpine
+env -u LD_PRELOAD ./svsp --base=$ROOTFS /usr/bin/st2                              # binary STATIS (no loader)
+env -u LD_PRELOAD ./svsp --base=$ROOTFS /usr/bin/bossv  # statik -> fork -> exec /bin/sh -> cat
+#   isolasi: cat /system/build.prop -> ENOENT; /dev /proc /sys tetap passthrough host
 ```
 
 ## Kesimpulan
 
 - **Permanen mustahil:** `chroot`/`mount`/namespace sungguhan (seccomp AND-min), VM (mati di firmware).
 - **Jalan buntu:** APK baru — domain keamanan (`untrusted_app`) dan seccomp-nya identik.
-- **Jalan berikutnya:** supervisor `SECCOMP_RET_USER_NOTIF` (listener sudah terbukti) untuk menutup
-  binary statis/Go dan syscall mentah yang mem-bypass LD_PRELOAD.
+- **Tembok terakhir sudah ditumbangkan:** supervisor `SECCOMP_RET_USER_NOTIF` (`svsp`) menutup **binary statis & syscall mentah** yang mem-bypass LD_PRELOAD — rewrite path terjadi di kernel, tanpa root, tanpa proot, native speed. `set*id` tetap butuh shim SIGSYS (`libfakeroot.so`) berdampingan (TRAP firmware menang via AND-min).

@@ -1,8 +1,7 @@
 # BRAINSTORM — "Yang tak bisa dipecahkan": peta kemungkinan & jalan nyata
 
 > Pertanyaan: *apakah yang tadinya dianggap **tidak bisa dipecahkan** bisa dipecahkan? mau itu bikin APK lagi atau apa?*
-> Jawaban singkat: **Dua tembok besar sudah dipecahkan tanpa root & tanpa proot (native speed).**
-> Satu tembok yang tersisa (syscall mentah / binary statis) punya jalan keluar yang tidak butuh APK: **supervisor seccomp USER_NOTIF**.
+> Jawaban singkat: **Tiga tembok besar sudah dipecahkan tanpa root & tanpa proot (native speed)** — termasuk yang terakhir: binary statis & syscall mentah, lewat **supervisor seccomp USER_NOTIF** (`svsp`).
 
 ---
 
@@ -18,6 +17,22 @@
 | Rantai exec di dalam wadah (`sh -c 'cat …'`, pipe) | interpreter `/lib/ld-musl…` tak ada di host | **patchelf semua binary wadah** → PT_INTERP menunjuk loader nyata di host | 7 binary di-patch; `ls | head`, pipe, write bukti ✓ |
 
 Ringkasan satu kalimat: **seccomp Android ternyata tidak membunuh tanpa syarat — semua larangannya adalah TRAP yang bisa dilewati handler, dan "chroot" bisa dipalsukan lewat interposisi simbol + rewrite env. Keduanya berjalan di kecepatan native.**
+
+### TAHAP 3 (SELESAI): supervisor `SECCOMP_RET_USER_NOTIF` → binary statis & syscall mentah
+
+| Pembuktian | Hasil nyata |
+|---|---|
+| Filter seccomp **komposisional** (AND-min): kita boleh *menambah* filter USER_NOTIF sendiri di atas larangan firmware | `svsp` berjalan tanpa root; child pasang filter pada dirinya sendiri, listener fd dikirim ke parent **bebas-filter** via `socketpair` + `SCM_RIGHTS` |
+| Arch-check BPF yang benar (bug klasik: `JEQ(ARCH, jt=1, jf=0)`; jt/jf terbalik = SIGSYS instan) | tercatat di `svsp.c` |
+| Rewrite-openat: parent membuka `base+path`, hasil fd disuntik via `SECCOMP_IOCTL_NOTIF_ADDFD` | busybox `cat /etc/alpine-release` → `3.24.2` — **tanpa LD_PRELOAD** |
+| Rewrite-stat/readlink/statfs: parent mengeksekusi, hasil ditulis ke memori child via `process_vm_writev` | `ls -l`, script yang stat/readlink ✓ |
+| Rewrite-execve: tulis ulang path di memori child + `CONTINUE` (kernel eksekusi ulang) | `sh -c` rantai: pipe, write/rm `/root/x.txt`, `ls /sbin` ✓ |
+| **Binary STATIS (tanpa loader)** — LD_PRELOAD tak relevan | `st2` (78 KB, `-nostdlib`, raw syscall): baca `/etc/alpine-release` via ADDFD = `3.24.2` ✓ |
+| **Boss test: statik → fork → exec `/bin/sh` dinamis → `cat`** | `bossv`: `SH-OK` + `3.24.2` ✓ — satu proses pohon campur statis/dinamis |
+| Isolasi terbalik | `cat /system/build.prop` → **ENOENT** (bukan EACCES host) ✓; `/dev/null`, `/sys` tetap passthrough ✓ |
+| Kematian target tidak membangunkan `RECV` yang terblokir (bug kernel Android) | loop `poll(listener, 200ms)` + `waitpid(WNOHANG)` → supervisor keluar bersih (rc=0), tanpa hang |
+| Batas jujur | execve path yang memerlukan rewrite tapi berada di memori **read-only** (.rodata) tidak bisa diubah → **ENOENT** (aman, tidak bocor ke host); shell/program normal membangun path di stack/heap (writable) → tetap jalan |
+| Batas yang tetap (tetap butuh shim/loader patched) | `set*id` dll.: `RET_TRAP` firmware (0x30000) menang atas `USER_NOTIF` (0x7fc00000) via AND-min → SIGSYS-shim `libfakeroot.so` tetap hidup berdampingan |
 
 ---
 
@@ -45,13 +60,13 @@ Yang masih BELUM 100% tertutup oleh solusi LD_PRELOAD + loader patched:
 2. **Binary statis (Go/C statis)** — tidak punya loader dinamis → LD_PRELOAD tak bisa disuntik. Program melihat host.
 3. **Identitas uid** — `getuid()` tetap 10386, bukan 0 (wajar: kita memang bukan root).
 
-### Jalan keluar yang MENJANJIKAN untuk celah 1 & 2: supervisor seccomp USER_NOTIF
+### Jalan keluar yang sudah TERBUKTI untuk celah 1 & 2: supervisor seccomp USER_NOTIF (`svsp`)
 
-- `SECCOMP_RET_USER_NOTIF` **terbukti berfungsi** di Android (listener fd=3 diperoleh pada percobaan sebelumnya).
+- `SECCOMP_RET_USER_NOTIF` **terbukti berfungsi penuh** di Android (lihat TAHAP 3 di atas): rewrite path untuk binary statis DAN syscall raw **tanpa LD_PRELOAD**.
 - Filter seccomp bersifat *komposisional* (AND-min) → kita **boleh menambahkan** filter sendiri yang meminta USER_NOTIF untuk kelas syscall path (`openat`, `execve`, `stat`, `mkdir`…) — ini **tidak melanggar** larangan firmware (kita hanya mengetatkan).
-- Pola kerja: proses target dijalankan dengan filter tambahan; **supervisor daemon** menerima notifikasi → menulis ulang path sesuai rootfs → mengeksekusi syscall asli atas nama target → mengembalikan hasil.
+- Pola kerja: child pasang filter pada dirinya sendiri (`NO_NEW_PRIVS` + `NEW_LISTENER`), kirim listener ke **parent bebas-filter** via SCM_RIGHTS; parent menulis ulang path sesuai rootfs → mengeksekusi syscall atas nama target (sendiri untuk side-effect, atau memori-rewrite + `CONTINUE` untuk execve/chdir, atau `ADDFD` untuk open).
 - Kenapa ini penting: intervensi terjadi **di kernel**, bukan interposisi simbol → berlaku untuk **binary statis, Go, dan syscall raw sekaligus**. Ini "proot dengan bahasa lain": tanpa ptrace, tanpa fork-chroot, tetap native-ish (hanya syscall path yang melewati supervisor).
-- Biaya: satu round-trip per syscall path (lebih lambat dari LD_PRELOAD), dan harus meniru semantik `ERESTART`/clone anak. Tapi ini **satu-satunya rute yang menutup seluruh kelas program**, dan **tidak butuh APK/root**.
+- Biaya: satu round-trip per syscall path (lebih lambat dari LD_PRELOAD), `execve` path di memori read-only tak bisa di-rewrite (ENOENT), dan `set*id` tetap butuh shim SIGSYS (TRAP firmware menang via AND-min). Tapi ini **satu-satunya rute yang menutup seluruh kelas program**, dan **tidak butuh APK/root**.
 
 Peta jalan yang jujur:
 
@@ -60,8 +75,9 @@ TAHAP 1 (SELESAI, terbukti): LD_PRELOAD fakechroot + SIGSYS shim + loader patche
   → dynamic musl: claude, busybox, apk-tools, shell penuh   [native speed]
 TAHAP 2 (SUDAH dipakai Claude): env host-absolut + symlink /proc /dev
   → menutup syscall raw pada jalur HOME/TMPDIR/cwd
-TAHAP 3 (peluang riset): supervisor USER_NOTIF
-  → menutup binary statis + Go + seluruh syscall raw; wadah "universal"
+TAHAP 3 (SELESAI, terbukti): supervisor USER_NOTIF (svsp)
+  → binary statis + syscall raw: openat/stat/execve/readlink/mkdir/… di-rewrite di kernel
+  → st2 & bossv (statik → fork → exec sh dinamis) jalan native; isolasi ENOENT terbukti
 TAHAP 4 (bukan prioritas): pembungkus APK hanya untuk distribusi/UX, bukan teknis
 ```
 
@@ -70,7 +86,7 @@ TAHAP 4 (bukan prioritas): pembungkus APK hanya untuk distribusi/UX, bukan tekni
 ## 4. Rekomendasi
 
 1. **Jangan bikin APK untuk memecahkan batasan** — secara teknis mustahil mengubah seccomp lewat APK; hanya menambah permukaan maintain.
-2. Fokus riset berikutnya: **supervisor USER_NOTIF** = jawaban "yang tidak bisa dipecahkan" yang tersisa (binary statis & syscall raw), dengan dasar yang sudah terbukti hari ini.
-3. Pakai hasil sekarang: `fake-run` + `libfakeroot.so` siap dipakai untuk **Claude Code native di dalam wadah Alpine** dan untuk menjalankan paket musl lain (busybox, apk, dll.) secara terisolasi.
+2. Supervisor `USER_NOTIF` **sudah jadi**: `svsp` + `libfakeroot.so` + `fake-run` menutup rantai penuh — binary dinamis (LD_PRELOAD, cepat) maupun statis/raw (supervisor, kernel-level) — untuk **Claude Code native** dan paket musl lain secara terisolasi, tanpa root, tanpa proot.
+3. Pengembangan wajar berikutnya: gabungkan `svsp` di bawah `fake-run` (pilih jalur cepat LD_PRELOAD untuk dinamis, otomatis jatuh ke supervisor untuk statis/raw), dan tambahkan handler `set*id` di sisi supervisor untuk kasus yang memblokir SIGSYS.
 
-> Kalimat penutup: *"Yang tak bisa dipecahkan" ternyata adalah soal memilih lapisan yang tepat — bukan kernel namespace (mati selamanya), bukan APK (jalan buntu), melainkan **trap seccomp + interposisi + (nanti) USER_NOTIF** — semua berjalan di kecepatan native, tanpa root, tanpa proot.*
+> Kalimat penutup: *"Yang tak bisa dipecahkan" ternyata adalah soal memilih lapisan yang tepat — bukan kernel namespace (mati selamanya), bukan APK (jalan buntu), melainkan **trap seccomp + interposisi + USER_NOTIF (kernel-level path supervisor)** — semuanya berjalan di kecepatan native, tanpa root, tanpa proot.*
