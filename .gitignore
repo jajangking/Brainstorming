@@ -2,6 +2,7 @@
 *.so
 *.o
 svsp
+pinterp
 
 # lingkungan wadah — bukan sumber proyek (besar)
 alpine-rootfs/

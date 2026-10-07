@@ -93,7 +93,7 @@ cd "$HOME_BASE"
 
 if [ "$MODE" = svsp ]; then
     # ===== jalur supervisor USER_NOTIF (statis / --svsp) =====
-    [ -n "$SVSP" ] || for d in "$(dirname "$0")" "$HOME" "$HOME/Brainstorming"; do
+    [ -n "$SVSP" ] || for d in "$(dirname "$0")" "$HOME" "$HOME/Brainstorming" "$PREFIX/bin"; do
         [ -x "$d/svsp" ] && { SVSP="$d/svsp"; break; }
     done
     [ -n "$SVSP" ] || { echo "fake-run: svsp tak ada. Bangun dulu: clang -O2 -o svsp svsp.c"; exit 1; }

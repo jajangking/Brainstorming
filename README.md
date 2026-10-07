@@ -26,26 +26,29 @@ secara **native** di Termux/Android tanpa root, tanpa proot — termasuk **isola
 - `raw-rt-sig.c` — resep handler SIGSYS dengan layout `sigaction` kernel (bionic)
 - `fake-run` — **runner universal** wadah palsu: binary dinamis → jalur cepat loader musl + `LD_PRELOAD`; binary **statis (tanpa PT_INTERP) otomatis** jatuh ke supervisor `svsp` (USER_NOTIF); `--svsp` memaksa supervisor.
 - `svsp.c` — supervisor `SECCOMP_RET_USER_NOTIF` (TAHAP 3): child pasang filter sendiri (`NO_NEW_PRIVS` + `NEW_LISTENER`), listener dikirim ke parent bebas-filter via SCM_RIGHTS; openat/stat/statx/statfs/readlink/execve/chdir/mkdir/unlink/rename/link/symlink/chmod/chown/truncate/utimensat/access/dll. di-rewrite `base+path` → eksekusi parent + `ADDFD`/`process_vm_writev`/memori-rewrite+`CONTINUE`. Menutup binary statis & syscall raw tanpa LD_PRELOAD.
+- `bootstrap.sh` — **pemasangan satu-perintah** (TAHAP 4): unduh/ekstrak minirootfs Alpine 3.24.2 (aarch64) → pasang musl-dev (header + libc.a/crt*.o, sekaligus jadi toolchain build STATIS) → patch loader (byte-patch diverifikasi hash, SIGSYS tak diblokir) → rewrite PT_INTERP semua binary wadah (`pinterp` in-place; `patchelf` bila perlu-perluasan) → passthrough `/dev /proc /sys` + relink applet busybox relatif → build `libfakeroot.so` + `svsp` → pasang `fake-run`/`svsp` ke `$PREFIX/bin` → verifikasi 4 jalur (dinamis, supervisor, statis, isolasi ENOENT). Idempoten.
+- `pinterp.c` — tool kecil tanpa dependensi: tulis ulang PT_INTERP **in-place** (path baru muat di segmen lama). Bila tak muat keluar kode 3 → `bootstrap.sh` menyerahkan ke `patchelf --set-interpreter` (terbukti untuk perluasan).
 
-## Reproduksi (ringkas)
+## Reproduksi (instalasi satu-perintah — TAHAP 4)
 
 ```sh
-# 1) rootfs Alpine + loader musl patched
-# 2) kompilasi shim (perlu musl-dev sebagai sysroot)
-clang --target=aarch64-alpine-linux-musl --sysroot=$ROOTFS \
-  -fPIC -shared -O2 -nostdlib -o libfakeroot.so libfakeroot.c
+pkg install clang binutils patchelf curl     # prasyarat
+git clone https://github.com/jajangking/Brainstorming && cd Brainstorming
+./bootstrap.sh                                # base default ~/alpine-rootfs
+fake-run cat /etc/alpine-release              # -> 3.24.2 (dinamis, jalur LD_PRELOAD)
+```
 
-# 3) normalisasi symlink rootfs (absolut -> relatif) + passthrough /dev /proc /sys
-# 4) patchelf semua binary wadah agar PT_INTERP menunjuk loader nyata di host
-# 5) jalankan — fake-run kini UNIVERSAL: deteksi otomatis
+`bootstrap.sh` idempoten: aman dijalankan ulang (base/loader/toolchain yang sudah benar dipakai ulang). Opsi: `--base=DIR` (wadah lain), `--prefix=DIR` (tujuan instal, default `$PREFIX`), `--no-download` (pakai cache `~/alpine-minirootfs.tar.gz` + `~/musl-dev-cache.apk`).
+
+Yang dibangun dari nol: rootfs segar terverifikasi (`SHA256` loader stock dicocokkan sebelum patch, hasil patch dicocokkan sesudahnya — bila versi minirootfs beda, script berhenti keras, tidak korup diam-diam), loader `ld-musl-patched.so.1`, toolchain musl-dev, symlink applet relatif, passthrough device set, shim, supervisor, dan runner.
+
+## Pemakaian manual (bila sudah punya wadah)
+
+```sh
 ./fake-run cat /etc/os-release          # dinamis -> jalur cepat LD_PRELOAD -> Alpine
 ./fake-run cat /system/build.prop      # -> ENOENT (isolasi terbukti)
 ./fake-run --svsp <program>            # paksa supervisor USER_NOTIF
 ./fake-run --loader=.../ld-musl...so.1 .../claude-bin --version   # Claude di dalam wadah
-
-# 6) TAHAP 3: binary STATIS (tanpa loader) -> OTOMATIS lewat supervisor svsp
-#   (LD_PRELOAD tak berlaku untuk statis; rootfs perlu libc.a + crt*.o utk membangunnya)
-clang -O2 -o svsp svsp.c
 ./fake-run /usr/bin/st2                # statik no-loader: baca /etc/alpine-release -> 3.24.2
 ./fake-run /usr/bin/bossv              # statik -> fork -> exec /bin/sh dinamis -> cat
 ```
