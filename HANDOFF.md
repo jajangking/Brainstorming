@@ -477,3 +477,176 @@ di depan fake-run saat tes.
     window DNS baik, `apk add` jalan normal (tree, figlet, bc, tput, ncurses terpasang
     hari ini). SIGSYS flaky sesekali (race startup vs seccomp Android, logcat `signal 31`)
     pada jalur cepat — 5/5 sukses pada sampling, pre-existing.
+- **BUG AKTIF terbuka: flake boot "not found" (env LD_* hilang ~0-25%)** — investigasi
+  lengkap, bukti empiris, locus tersisa, dan eksperimen berikutnya ada di **§11**. Status
+  git terkini (`3274c0b` lokal, `origin/main` tertinggal) juga di §11.1.
+
+---
+
+## 11. BUG AKTIF — FLAKE BOOT "not found" (handoff lengkap ke arena.ai)
+
+> **Ini pekerjaan TERBUKA paling penting.** Fungsi inti semua hijau (figlet Q, alpine-release
+> 3.24.2, claude 2.1.291, tput 80, bc 42, apk-tools 3.0.8-r0, `alpine -c echo halo-wadah`),
+> tapi boot wadah **sesekali** (0–25%, tergantung kondisi device) kehilangan LD_PRELOAD →
+> shim tak terload → binary eksternal "not found". Sudah 2 hari diselidiki; baca 11.3–11.7
+> sebelum menyentuh apa pun — semua teori lama sudah dibunuh dengan bukti.
+
+### 11.1 Status git SEKARANG (bereskan duluan)
+
+```sh
+cd ~/Brainstorming && git log --oneline -3 && git status --short && git log origin/main --oneline -1
+```
+
+- Local `main` = **`3274c0b`** ("fix: fk_exec_one argv[0] off-by-one — binary apk add punya
+  argumen ekstra") — **fix arena TERVERIFIKASI benar (figlet render satu "Q" = off-by-one
+  sembuh; tree abs+bare OK) dan sudah di-merge FF** di atas `f446942`.
+- **`origin/main` MASIH `f446942` — `3274c0b` BELUM DI-PUSH.**
+- Working tree: `fake-run` MODIFIED tak-ter-commit (54+/2−) = **percobaan fix yang GAGAL**
+  (lihat 11.9). **JANGAN di-push sebelum diputuskan keep/revert.**
+- Saran: push `3274c0b` sekarang (fix independen, terverifikasi), biarkan diff `fake-run`
+  sebagai WIP sampai flake tuntas.
+
+### 11.2 Gejala & laju
+
+```
+alpine -c "tree -L 1 /usr | head"      # kadang "tree: not found"
+fake-run --base=$R /bin/sh -c 'tree'   # kadang "not found"
+```
+- Identik command → hasil berbeda antar run. Laju terukur: 11/50, 8/40, 7/30, 3/24, 4/30,
+  2/30, 5/30, 6/40 — **bergeser antar blok (0–25%)**, kemungkinan termal/condition device.
+- Semua run GAGAL identik: ash hidup, tapi `LD_PRELOAD` & `LD_LIBRARY_PATH` **HILANG dari
+  env-nya** → shim (libfakeroot.so) tak pernah di-dlopen → tanpa rewrite path → binary di
+  luar base "not found" (kernel ENOENT = kontrolnya, lihat 11.3#1).
+
+### 11.3 Fakta mekanisme (TERBUKTI, jangan dibantah tanpa bukti baru)
+
+1. **Kontrol**: binary ber-interp mentah di-exec polos di host → kernel ENOENT. **Setiap
+   boot non-dispatch = "not found"** — apa pun penyebab LD_PRELOAD hilang.
+2. **Dispatch** (shim `execve` wrapper → loader-as-main, env=`environ`) → **100% andal,
+   TIDAK PERNAH flake**. Jalur runtime di dalam wadah aman. Flake hanya di **BOOT**
+   (rantai `fake-run` → `env(1)` → loader → ash).
+3. **DBG shim** (`FK_DBG`: constructor + semua wrapper exec + interpose posix_spawn):
+   run GAGAL punya **NOL baris `[fk]` termasuk constructor** → shim memang tidak pernah
+   terload → `LD_PRELOAD` benar-benar tidak ada saat loader membaca env.
+4. **Ringkasan env run GAGAL** (dump `env | sort`, 24 run): hilang **PERSIS dua var**
+   `LD_PRELOAD` + `LD_LIBRARY_PATH`; 10 baris lain utuh (FAKE_BASE, HOME, PATH, PWD, ...
+   lengkap). Bukan truncation blok.
+5. **Marker test (DISKRIMINATOR KUNCI, 30× lewat fake-run)**:
+   `fake-run LD_PRELOAD_32=mark2 FAKE_MARK=mark1 --base=$R /bin/sh -c 'env | sort'`
+   → run UNSET (8/30) kehilangan **LD_PRELOAD + LD_LIBRARY_PATH + LD_PRELOAD_32 — persis
+   ketiga nama di daftar `-u` env(1)** — sementara **FAKE_MARK (var TERAKHIR, tidak di
+   `-u`) SELALU ADA**. ⇒ strip menyasar **tepat set nama opsi `-u`** env(1), selalu
+   bersamaan, bukan truncation.
+6. **env(1) = GNU coreutils 9.11** (`/data/data/com.termux/files/usr/bin/env -> coreutils`,
+   bukan busybox). Proses opsi: `-i` kosongkan, `-u NAME` unset, `NAME=value` set —
+   berdasar uji, urutan normalnya deterministik-bersih (lihat 11.4).
+
+### 11.4 Riwayat eksperimen (kronologis, semua on-device)
+
+| # | Uji | Hasil | Makna |
+|---|---|---|---|
+| a | `env(1) → loader` direct-invocation (path benar) | 0/32 bersih | loader-as-main OK bila env benar |
+| b | `env(1) → $R/bin/sh` manual (E1/E2) | 0/20, 0/20 | env(1)→ash manual bersih |
+| c | `env(1) -i <daftar persis fake-run> → $PREFIX/bin/env` (bionic) | 24/24, 0/50 | **env(1) standalone deterministik-bersih** |
+| d | `env(1)` → loader → (semua varian) | 100% bersih | dispatch/loader OK |
+| e | rantai `fake-run` | **FLAKY** (11/50 … 5/30) | flake butuh konteks fake-run |
+| f | Marker test lewat fake-run | 8/30 UNSET (trio `-u` hilang, FAKE_MARK ada) | strip = tepat daftar `-u`; lihat 11.3#5 |
+| g | `env(1)` → ash langsung + marker (TANPA fake-run) | **0/40 bersih** | loader-as-interp BUKAN pelaku strip |
+| h | `bash -c 'exec env -i <sama>'` → ash | **0/40 bersih** | "bash di tengah" bukan pelaku |
+| i | `fake-run` bare (TANPA `timeout`) | **5/30 FLAKY** | `timeout` tak bersalah |
+| j | `fake-run` TANPA prefix `env -u LD_PRELOAD` (preload termux-exec host tetap hadir di rantai) | **4/30 FLAKY** | teori "harness yang buang preload = penyebab" **MATI** |
+| k | `/proc/self/environ` utk bedakan envp-asli vs `environ` | **DIBLOKIR Android** (proc=0 bahkan di run SET) | jangan dipakai; alternatif lihat 11.7#E6 |
+| l | `command -v env` | GNU coreutils 9.11 | bukan busybox |
+
+### 11.5 Yang sudah DIBUNUH (jangan ulangi)
+
+- ❌ Bukan seccomp (logcat bersih, tanpa SIGSYS di jam flake; histori SIGSYS 01:54-02:03 &
+  x-sh CANNOT-LINK 12:55 = lampau).
+- ❌ Bukan truncation blok env (FAKE_MARK var terakhir selalu ada).
+- ❌ Bukan env(1) standalone (0/50 dengan daftar flag persis).
+- ❌ Bukan loader-as-interpreter per se (env→ash langsung 0/40).
+- ❌ Bukan `timeout` (fake-run bare tetap flaky).
+- ❌ Bukan strip `env -u LD_PRELOAD` di harness (fr tanpa prefix tetap flaky 4/30).
+- ❌ Bukan bash-di-tengah (bash -c exec env 0/40).
+
+### 11.6 Locus tersempit yang tersisa
+
+Flake **MEMBUTUHKAN skrip fake-run** di antara env(1) dan ash. Yang fake-run tambahkan
+vs uji g/h yang bersih:
+
+1. `cd "$HOME_BASE"` sebelum exec (baris 121) → CWD env(1) = `$HOME_BASE` (uji g/h dari `$HOME`).
+2. `PWD="$HOME_BASE"` di daftar env (uji g/h TIDAK men-set PWD).
+3. Subproses sebelum exec: `is_dynamic` → `readelf -l` (fork+exec), `interp_of` → `od|dd|tr|head`.
+4. `set -euo pipefail`; `mkdir -p root tmp`; ekspansi `TERM="${TERM:-...}"` +
+   `${extra_env[@]+...}`.
+5. `exec env` (env menggantikan proses bash) vs `fork env` di uji g. — sudah dianulir oleh h
+   (bash -c 'exec env') tapi h tidak punya #1/#2/#3.
+
+### 11.7 Eksperimen berikutnya (murah, urut prioritas — lakukan semuanya)
+
+- **E1**: `cd $R && env -i <daftar penuh fake-run TERMASUK PWD=$HOME_BASE> $R/bin/sh -c 'sig'` 40×
+  → isolasi CWD+PWD. (Pakai `$PREFIX/bin/env` + marker LD_PRELOAD_32/FAKE_MARK utk verifikasi.)
+- **E2**: salinan fake-run dengan baris `cd "$HOME_BASE"` dihapus (atau `cd "$HOME"`) → 40×.
+- **E3**: salinan fake-run dengan `PWD=` dihapus dari kedua daftar env → 40×.
+- **E4**: fake-run + debug `echo` penuh baris `exec env -i` tiap run (pasti argv identik tiap run).
+- **E5**: hapus **seluruh flag `-u`** dari daftar env (redundan: `env -i` sudah mulai kosong) → 40×.
+  Kalau bersih: interaksi `-u`-list di coreutils env 9.11 adalah pemicunya → fix = buang `-u`.
+- **E6** (bila E1–E5 tak ada yang bersih): cari strip di dalam musl ldso —
+  `strings ~/alpine-rootfs/lib/ld-musl-patched.so.1 | grep -E '^LD_(PRELOAD|LIBRARY_PATH|PRELOAD_32)'`,
+  lalu bandingkan dengan loader STOCK (`bbx-old-bak`? atau ekstrak ulang dari bootstrap).
+  Musl setara glibc punya sanitasi env LD_* di sebagian jalur init; loader = stock yang
+  di-byte-patch 7 situs sinyal ⇒ **bandingkan perilaku stock vs patched** (uji boot dengan
+  `LD_PRELOAD` via `env` ke binary ber-interp STOCK bila ada salinannya).
+  Cek juga `LD_DEBUG`-style: musl dukung `LD_DEBUG=all`? (musl tidak; jangan buang waktu).
+
+### 11.8 Arah fix (saat locus ditemukan)
+
+- **Paling murah & elegan bila E5 bersih**: hilangkan flag `-u` redundan dari kedua cabang
+  `exec env -i` di fake-run. Tetap `-i` (mulai kosong) + `NAME=value` murni.
+- **Paling kokoh (anti-semua-locus)**: buat boot TIDAK bergantung pada env sama sekali —
+  patch loader agar **selalu dlopen shim** (byte-patch prolog fungsi tertentu utk memanggil
+  dlopen path tetap, atau bangun loader dari sumber musl dengan shim di-hardcode).
+  Jalur dispatch shim (11.3#2) sudah terbukti 100% andal — idealnya boot masuk ke jalur itu
+  secepat mungkin.
+- **Fallback pragmatis**: boot lewat perantara C statis kecil (bukan env coreutils) yang membangun
+  env secara deterministik dengan `execve` polos — tapi fakta #g (0/40) menunjukkan env coreutils
+  sendiri bukan masalahnya, jadi ini bukan prioritas.
+
+### 11.9 Inventaris perubahan & artefak
+
+**WIP `fake-run` (UNCOMMITTED — jangan push tanpa keputusan):**
+1. `od -An -vu1` → `od -An -t u1` di `is_dynamic` + kajian `interp_of` (fix nyata: `-vu1`
+   tidak valid di host ini; fallback lama kena juga). **LAYAK PERTAHANKAN.**
+2. `interp_of()` baru + cabang direct-exec bila `IP == $HOME_BASE/lib/ld-musl-patched.so.1`
+   (interp sudah host-resolvable → exec langsung, hindari loader-as-main saat boot).
+   **TERBUKTI TIDAK MENYEMBUHKAN flake** (regresi 8/40, 7/30 setelah edit; uji i/j tetap
+   flaky). **Keep atau revert?** — direct-exec sendiri benar & sejalan arah fix 11.8, tapi
+   saat ini mubazir karena pelaku strip bukan loader-as-main. Keputusan di tangan arena.
+3. `$PREFIX/bin/fake-run` sudah disinkron = salinan hasil edit ini.
+
+**Shim produksi `~/libfakeroot.so` (35440 B, sha256 `083e69e3...`, build arena 3274c0b,
+terpasang):** interpose `execv/execl/execve/execvp/execvpe` + loader re-exec utk interp
+mentah + handler SIGSYS. **Belum** interpose `posix_spawn/posix_spawnp` (grep = 0) —
+coreutils/python memakainya; DBG shim punya wrapper-nya tapi produksi belum (gap nyata,
+belum terbukti terkait flake). `statx` sudah di-interpose.
+
+**Artefak debug di `/data/data/com.termux/files/usr/tmp/opencode/` (bukan repo):**
+`flake-test.sh` (mode fr/frn/al), `iso.sh` (A/B/C), `locus2.sh` (direct/bashmid),
+`locus-test.sh` (proc — diblokir Android), `libfakeroot-dbg.{c,so}` (shim FK_DBG:
+constructor + exec + posix_spawn), `env-1..24-{SET,UNSET}.txt` (dump env 24 run),
+`interp_of.sh` (impl uji interp_of), `libfakeroot-new/final*.so` (build lama).
+
+### 11.10 Cara repro cepat (copy-paste)
+
+```sh
+R=$HOME/alpine-rootfs
+# sig probe: [x] = shim-load OK; [] = FLAKE (LD_PRELOAD hilang)
+for i in $(seq 1 30); do
+  out=$(fake-run --base="$R" /bin/sh -c 'printf "sig=[%s]\n" "${LD_PRELOAD+x}"' 2>&1)
+  echo "$out" | grep -q 'sig=\[x\]' || echo "run$i: UNSET [$out]"
+done
+# marker: UNSET harus kehilangan tepat trio -u (LD_PRELOAD, LD_LIBRARY_PATH, LD_PRELOAD_32)
+fake-run LD_PRELOAD_32=mark2 FAKE_MARK=mark1 --base="$R" /bin/sh -c 'env | sort' | grep -E '^(LD_|FAKE_)'
+```
+Syarat lingkungan: jalankan dari shell Termux biasa (bukan coba bereksperimen sambil
+dipanaskan device — laju flake sensitif kondisi termal). Pakai `timeout 20` kalau takut gantung.
