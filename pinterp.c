@@ -28,6 +28,7 @@
  *
  * Tanpa dependensi selain libc; kompilasi: clang -O2 -o pinterp pinterp.c
  */
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,7 +52,15 @@ int main(int argc, char **argv) {
     size_t need = strlen(loader) + 1;
 
     int fd = open(path, O_RDWR);
-    if (fd < 0) { perror(path); return 2; }
+    if (fd < 0) {
+        if (errno == ETXTBSY) {         /* file sedang dieksekusi kernel (mis. loader
+                                           yang dipakai shell wadah yang masih hidup) —
+                                           dilewati, bukan kesalahan fatal */
+            fprintf(stderr, "%s: busy (sedang dieksekusi) — dilewati\n", path);
+            return 4;
+        }
+        perror(path); return 2;
+    }
     off_t fsz = lseek(fd, 0, SEEK_END);
     if (fsz < 64) { close(fd); return 1; }
     u8 *b = malloc((size_t)fsz);

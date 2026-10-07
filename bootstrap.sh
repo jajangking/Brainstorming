@@ -182,6 +182,7 @@ rewrite_interp() {
                  || { fail=$((fail+1)); warn "patchelf gagal: $f"; }
                n=$((n+1)) ;;
             2) fail=$((fail+1)); warn "I/O gagal: $f" ;;
+            4) warn "dilewati (sedang dieksekusi): $f" ;;   # ETXTBSY — bukan kegagalan
         esac
     done < <(find "$BASE" -type f -size +64c)
     log "PT_INTERP di-set: $n file${fail:+, $fail gagal}"
@@ -215,16 +216,31 @@ install() {
 }
 
 # ------------------------------------------------------------- verifikasi
+# Device ini punya transient loader/runtime sesekali (CANNOT-LINK, SIGSYS) di bawah
+# beban build — retry tiap lengan sebelum dianggap gagal, supaya sekali kedip tidak
+# menggagalkan seluruh bootstrap.
+try_ok() {  # try_ok <label> <max> -- <cmd...>  ; cetak output bila sukses, die bila terus gagal
+    local label=$1 max=$2; shift 2; [ "$1" = "--" ] && shift
+    local i rc=1 out
+    for i in $(seq 1 "$max"); do
+        out=$("$@") && rc=0 && break
+        echo "  ⚠ $label percobaan $i/$max gagal (rc=$?) — coba lagi" >&2
+        sleep 1
+    done
+    [ "$rc" -eq 0 ] && { printf '%s\n' "$out"; return 0; }
+    die "$label gagal"
+}
+
 verify_run() {
     local base="$BASE"
     local fr
     if [ -x "$PREFIX/bin/fake-run" ]; then fr="$PREFIX/bin/fake-run"; else fr="$SRCFAKE"; fi
 
     echo "----- V1 dinamis (jalur cepat LD_PRELOAD) -----"
-    env -u LD_PRELOAD "$fr" --base="$base" cat /etc/alpine-release
+    try_ok "V1 dinamis" 3 -- env -u LD_PRELOAD "$fr" --base="$base" cat /etc/alpine-release
 
     echo "----- V2 supervisor dipaksa (--svsp, binary dinamis) -----"
-    env -u LD_PRELOAD "$fr" --base="$base" --svsp busybox cat /etc/alpine-release
+    try_ok "V2 supervisor" 3 -- env -u LD_PRELOAD "$fr" --base="$base" --svsp busybox cat /etc/alpine-release
 
     echo "----- V3 STATIS (auto -> supervisor) -----"
     cat > "$TMPW/boot-static.c" <<'EOF'
@@ -243,7 +259,7 @@ EOF
         "$base/usr/lib/crt1.o" "$base/usr/lib/crti.o" "$TMPW/boot-static.c" \
         "$base/usr/lib/libc.a" "$base/usr/lib/crtn.o" \
         || die "build boot-static gagal"
-    env -u LD_PRELOAD "$fr" --base="$base" "$base/usr/bin/boot-static"
+    try_ok "V3 statis" 3 -- env -u LD_PRELOAD "$fr" --base="$base" "$base/usr/bin/boot-static"
 
     echo "----- V4 isolasi (harus ENOENT) -----"
     env -u LD_PRELOAD "$fr" --base="$base" cat /system/build.prop || true
