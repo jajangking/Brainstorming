@@ -17,6 +17,7 @@ secara **native** di Termux/Android tanpa root, tanpa proot — termasuk **isola
 
 ## Isi
 
+- `HANDOFF.md` — **serah terima ke arena.ai / agen lanjutan**: status mutakhir, checklist pengerasan 5 item dengan kriteria terima, gotchas kritis (tabel syscall arm64, resep build, quirk svsp), verifikasi, dan prompt siap-tempel.
 - `BRAINSTORM.md` — peta lengkap kemungkinan/mustahil + argumen kenapa APK adalah jalan buntu
 - `libfakeroot.c` — shim utama (fakechroot rewrite path + handler SIGSYS, musl, `-nostdlib`)
 - `segcshim.c` — shim minimal netralisasi SIGSYS
