@@ -77,7 +77,27 @@ static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {
 /* ------------------------------------------------------------------ */
 /* 2. Path rewriting                                                  */
 /* ------------------------------------------------------------------ */
+/* Prefix path HOST Android yang TIDAK boleh di-rewrite ke $BASE.
+ * Konsisten dgn svsp passthrough (HANDOFF §19.2.2). Tanpa ini, akses
+ * artefak host (mis. file di /data/data/.../tmp) via wadah jadi ENOENT
+ * karena di-rewrite ke $BASE/data/... (device-feedback ronde 2 butir 5). */
+static int fk_host_prefix(const char *p) {
+    return !strncmp(p, "/data/", 6) || !strcmp(p, "/data")
+        || !strncmp(p, "/system/", 8) || !strcmp(p, "/system")
+        || !strncmp(p, "/apex/", 6)
+        || !strncmp(p, "/vendor/", 8)
+        || !strncmp(p, "/product/", 9)
+        || !strncmp(p, "/linkerconfig/", 14)
+        || !strncmp(p, "/dev/", 5) || !strcmp(p, "/dev")
+        || !strncmp(p, "/proc/", 6) || !strcmp(p, "/proc")
+        || !strncmp(p, "/sys/", 5) || !strcmp(p, "/sys");
+}
+
 static void fk_rewrite(char *out, size_t n, const char *p) {
+    if (fk_host_prefix(p)) {                          /* host: apa adanya */
+        snprintf(out, n, "%s", p);
+        return;
+    }
     size_t bl = strlen(fk_base);
     if (strncmp(p, fk_base, bl) == 0 &&
         (p[bl] == '\0' || p[bl] == '/')) {

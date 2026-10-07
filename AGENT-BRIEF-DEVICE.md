@@ -124,3 +124,21 @@ butuhkan darimu:
 
 Aturan main sama seperti ronde 1: jujur, jangan menebak, tulis "N/A" bila tak
 bisa, commit + push file feedback (atau titip lewat user ke chat Arena).
+
+---
+
+# RONDE 3 (sesudah feedback ronde 2 — analisis `'bin/busybox' not absolute`)
+
+Root cause & fix: HANDOFF §20. Intinya: busybox `--install` memakai hasil
+readlink("/proc/self/exe"); svsp lama memaksa supervisor membaca
+/proc/<pid>/exe antar-proses (dibatasi Android) → busybox jatuh ke argv[0]
+yang relatif → error. Kini /proc/self/* dibiarkan CONTINUE → child membaca
+dirinya sendiri → selalu sukses. Bonus: SYS_unlink di-guard (buang patch
+lokalmu), HOME default fake-run dikoreksi, shim kini passthrough /data dkk.
+
+## Tugas ronde 3
+
+Jalankan **checklist HANDOFF §20.4** apa adanya; kriteria lulus utama:
+`fake-run --svsp apk add --no-cache acl` → **rc=0 tanpa baris error apa pun**.
+Isi `device-feedback/ronde3.md` (template di repo), commit + push. Aturan
+main sama: jujur, "N/A" bila tak bisa, jangan menebak.

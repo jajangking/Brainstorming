@@ -596,27 +596,34 @@ static void handle(int listener, const struct seccomp_notif *req) {
         cache_store(pbuf, pout, changed);
     }
 
-    /* Dua alasan supervisor TETAP harus menangani syscall yang path-nya tidak
-     * berubah (selain itu CONTINUE = child menjalankan sendiri, paling murah):
-     *   (a) /proc/self/... — hanya benar di child. Supervisor harus memakai
-     *       /proc/<pid-child>. C_EXEC/C_CHDIR dikecualikan karena keduanya
-     *       memang di-CONTINUE (child yang exec/chdir → /proc/self tetap sah).
-     *   (b) open O_TMPFILE — flag hanya bisa di-mask di supervisor; path apk
-     *       relatif (".") sehingga changed=0 (lihat SVSP_HAS_TMPFILE). */
+    /* Kapan supervisor TETAP menangani syscall yang path-nya tidak berubah
+     * (selain itu CONTINUE = child menjalankan sendiri, paling murah):
+     *   (a) open O_TMPFILE — flag hanya bisa di-mask di supervisor; path apk
+     *       relatif (".") sehingga changed=0 (lihat SVSP_HAS_TMPFILE).
+     *   (b) exec — script shebang wadah butuh wrapping (shebang_wrap).
+     * CATATAN /proc/self (device-feedback ronde 2): JANGAN dipaksa ke
+     * supervisor. Path /proc/... passthrough (changed=0) -> child jalankan
+     * sendiri -> /proc/self memang benar di child. proc_self_fix diterapkan
+     * HANYA bila supervisor benar-benar mengeksekusi (changed=1), lihat
+     * bawah. Memaksa supervisor membaca /proc/<pid>/exe antar-proses bisa
+     * gagal di Android (ptrace/SELinux) -> busybox --install gagal readlink
+     * -> jatuh ke argv[0] -> "'bin/busybox' is not an absolute path". */
     int forced = 0;
-    if (cls != C_EXEC && cls != C_CHDIR && proc_self_fix(pout, sizeof pout, pid))
-        forced = 1;
     if (cls == C_OPEN && nr == SYS_openat && SVSP_HAS_TMPFILE(a[2]))
         forced = 1;
-    /* exec selalu ditangani: script shebang wadah butuh wrapping walau
-     * path-nya relatif/tak berubah (lihat shebang_wrap). */
     if (cls == C_EXEC)
         forced = 1;
+    if (changed && cls != C_EXEC && cls != C_CHDIR)
+        proc_self_fix(pout, sizeof pout, pid);
 
     /* pembersihan shebang-wrap: script wadah di-unlink (apk menghapus
      * trigger di lib/apk/exec pasca-run) -> buang juga .orig-svsp-nya.
      * Best effort; cwd supervisor == base (chdir di main). */
+#ifdef SYS_unlink
     if (cls == C_SIDE && (nr == SYS_unlinkat || nr == SYS_unlink)) {
+#else
+    if (cls == C_SIDE && nr == SYS_unlinkat) {   /* arm64: SYS_unlink tak ada */
+#endif
         char og[4400];
         if (pbuf[0] == '/' && !passthrough(pbuf))
             snprintf(og, sizeof og, "%s%s.orig-svsp", base, pbuf);

@@ -18,9 +18,10 @@
 set -euo pipefail
 
 # Default utk resep `env -i ... fake-run ...` (set -u tak boleh mati karena
-# HOME/PREFIX tak ada — temuan device-feedback 2026-10-07).
+# HOME/PREFIX tak ada — temuan device-feedback 2026-10-07). HOME default =
+# home Termux SEBENARNYA ($PREFIX/home TIDAK ADA di device — feedback ronde 2).
 : "${PREFIX:=/data/data/com.termux/files/usr}"
-: "${HOME:=$PREFIX/home}"
+: "${HOME:=/data/data/com.termux/files/home}"
 
 HOME_BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
 SHIM="${FAKE_SHIM:-$HOME/libfakeroot.so}"

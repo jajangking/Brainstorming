@@ -1170,3 +1170,76 @@ env -i APK_SCRIPT=trigger APK_PACKAGE=busybox bash fake-run --ldpreload \
 # 4. Laporkan ke device-feedback/<tanggal>-r2.md: RC tiap langkah, isi
 #    lib/apk/exec, output ./apk-doctor, dan sisa pesan aneh apa pun.
 ```
+
+## 20. Feedback ronde 2 → fix ronde 3 (`'bin/busybox' is not an absolute path`)
+
+Feedback: `device-feedback/ronde2.md`. Kemajuan besar: wrapper svsp benar
+(tangkapan wrapper di device persis desain), `ca-certificates` trigger bebas
+`CANNOT LINK`, `lib/apk/exec/` bersih, SBARGS/env-i beres. Sisa: `--svsp apk
+add acl` masih rc=1 — `busybox: 'bin/busybox' is not an absolute path`.
+
+### 20.1 Root cause (dibuktikan dari sumber busybox + test sandbox)
+
+1. busybox `--install` (`libbb/appletlib.c:880`): `xmalloc_readlink(
+   "/proc/self/exe")` dulu; **hanya bila readlink GAGAL** jatuh ke `argv[0]`
+   dan mati bila argv[0] tak absolut.
+2. exec `/bin/busybox` dari script trigger: string path cuma 11 byte,
+   rewrite `$BASE/bin/busybox` (45) tak muat → fallback C_EXEC menulis
+   `"bin/busybox"` relatif (jalan, cwd=base) — tapi **buffer path = buffer
+   argv[0]** (ash/sh memakai string sama) → argv[0] ikut jadi relatif.
+3. Di device, readlink `/proc/self/exe` GAGAL sehingga fallback argv[0]
+   dipakai. Kenapa gagal: sejak ronde 1 svsp MEMAKSA supervisor menangani
+   `/proc/self/*` (`proc_self_fix` → supervisor membaca `/proc/<pid>/exe`
+   antar-proses; akses lintas-proses ke `/proc/pid/exe` butuh izin ala
+   ptrace yang dibatasi sebagian Android/SELinux).
+
+### 20.2 Fix ronde 3
+
+- **svsp: `/proc/self/*` TIDAK lagi dipaksa ke supervisor.** Path `/proc/...`
+  passthrough (changed=0) → CONTINUE → **child membaca dirinya sendiri** —
+  selalu diizinkan kernel dan selalu benar. `proc_self_fix` kini hanya
+  diterapkan bila supervisor benar-benar mengeksekusi (changed=1). Dengan
+  ini busybox mendapat path absolut dari readlink sendiri → argv[0] relatif
+  tak lagi dipersoalkan. (Test sandbox: exec fallback menghasilkan argv[0]
+  relatif + readlink-self absolut — persis kondisi device, dan busybox akan
+  memilih hasil readlink.)
+- **`SYS_unlink` di-guard `#ifdef`** di blok pembersihan `.orig-svsp`
+  (arm64 tak punya SYS_unlink; patch lokal agent lokal ronde 2 kini resmi,
+  silakan buang patch lokalnya saat `git pull`).
+- **`fake-run`: default `HOME` = `/data/data/com.termux/files/home`**
+  (sebelumnya `$PREFIX/home` — tak ada di device).
+- **Shim (`libfakeroot.c`): passthrough prefix host** `/data /system /apex
+  /vendor /product /linkerconfig /dev /proc /sys` di `fk_rewrite` — konsisten
+  dgn svsp §19.2.2; artefak host (mis. file di `/data/.../tmp`) kini bisa
+  diakses program wadah. `/dev /proc /sys` sebelumnya via symlink `$BASE/*`,
+  hasil akhir sama.
+
+### 20.3 Verifikasi sandbox ronde 3
+
+```
+exec fallback "/bin/fbb" (tak muat): argv[0]=relatif, readlink-self absolut OK
+O_TMPFILE suite (EISDIR + fallback renameat + O_DIRECTORY murni)   OK
+wrap chain shebang (argv[1]=sh utuh)                               OK
+fake-run --svsp script shebang SBARGS                              OK
+shim: O_DIRECTORY murni, O_TMPFILE→EISDIR, /data passthrough,
+      env-merge clearenv                                           OK
+```
+
+### 20.4 Checklist device RONDE 3 (kriteria lulus = butir 1 rc=0 murni)
+
+```bash
+cd ~/Brainstorming && git pull && git status     # pastikan patch lokal SYS_unlink
+                                                 # dibuang/ditimpa (sudah di hulu)
+./install.sh
+
+./apk-doctor --clear-broken
+fake-run --svsp apk add --no-cache acl; echo RC=$?           # HARUS rc=0
+fake-run --svsp apk add --no-cache ca-certificates openssl; echo RC=$?  # rc=0
+fake-run apk add busybox; echo RC=$?                          # rc=0
+./apk-doctor                                                  # "bersih"
+fake-run --svsp apk add --no-cache attr; echo RC=$?           # transaksi lanjutan rc=0
+ls $BASE/lib/apk/exec/                                        # kosong
+# ekstra (shim /data passthrough):
+fake-run /bin/busybox test -e /data/data/com.termux/files/home && echo PASSTHROUGH-OK
+# isi device-feedback/ronde3.md (template di repo), commit + push.
+```
