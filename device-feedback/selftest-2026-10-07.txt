@@ -1,0 +1,27 @@
+== selftest 2026-10-07 23:19:53 mode=full base=/data/data/com.termux/files/home/alpine-rootfs ==
+[PASS] ada: /data/data/com.termux/files/usr/bin/fake-run
+[PASS] ada: /data/data/com.termux/files/home/Brainstorming/apk-doctor
+[PASS] base ada: /data/data/com.termux/files/home/alpine-rootfs
+[PASS] shim libfakeroot.so
+[PASS] svsp
+[PASS] loader patched
+[PASS] resolv.conf >=2 NS (dapat 4)
+[PASS] resolv.conf ada baris options
+[FAIL] apk-doctor: ada flag f/s basi — 
+[info] baseline: flag f/s dibersihkan dulu (backup .bak-doctor.* disimpan apk-doctor)
+[PASS] shim: apk --version
+[info] shim: apk add --no-cache acl ...
+[PASS] shim: apk add acl rc=0
+[PASS] shim: apk add tanpa baris error
+[PASS] shim: apk add busybox (trigger) rc=0
+[info] svsp: apk add --no-cache acl ...
+[PASS] svsp: apk add acl rc=0
+[PASS] svsp: tanpa 'failed to write database'
+[PASS] svsp: tanpa 'not an absolute path'
+[PASS] svsp: tanpa baris error lain
+[PASS] svsp: lib/apk/exec kosong
+[PASS] fake-run SBARGS (busybox sh -c)
+[PASS] shim: /data passthrough
+[info] cleanup: purge acl ...
+[PASS] akhir: DB tetap bersih
+== RINGKASAN: 1 FAIL ==
