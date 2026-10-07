@@ -100,7 +100,7 @@ if [ "$MODE" = svsp ]; then
     [ -n "$SVSP" ] || for d in "$(dirname "$0")" "$HOME" "$HOME/Brainstorming" "$PREFIX/bin"; do
         [ -x "$d/svsp" ] && { SVSP="$d/svsp"; break; }
     done
-    [ -n "$SVSP" ] || { echo "fake-run: svsp tak ada. Bangun dulu: clang -O2 -o svsp svsp.c"; exit 1; }
+    [ -n "$SVSP" ] || { echo "fake-run: svsp tak ada. Jalankan bootstrap.sh dulu (build svsp statis musl)"; exit 1; }
     [ -x "$SVSP" ] || { echo "fake-run: svsp tak dapat dieksekusi: $SVSP"; exit 1; }
     exec env -i \
       FAKE_BASE="$HOME_BASE" \

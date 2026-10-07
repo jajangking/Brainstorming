@@ -108,12 +108,13 @@ provision_rootfs() {
 
 # ----------------------------------------------------------- toolchain musl-dev
 musl_dev() {
-    if [ -f "$BASE/usr/lib/libc.a" ] && [ -d "$BASE/usr/include" ]; then
-        log "toolchain musl-dev sudah ada — dipakai ulang"; return 0
+    if [ -f "$BASE/usr/lib/libc.a" ] && [ -d "$BASE/usr/include" ] \
+       && [ -f "$BASE/usr/include/linux/seccomp.h" ]; then
+        log "toolchain musl-dev + linux-headers sudah ada — dipakai ulang"; return 0
     fi
-    [ -n "${NO_DL:-}" ] && die "musl-dev kurang & mode --no-download"
+    [ -n "${NO_DL:-}" ] && die "toolchain musl kurang & mode --no-download"
     local V pkg cached="$HOME/musl-dev-cache.apk"
-    log "cari versi musl-dev di indeks repositori Alpine..."
+    log "cari versi paket di indeks repositori Alpine..."
     curl -fsSL "$CDN/main/aarch64/APKINDEX.tar.gz" -o "$TMPW/apkindex.tar.gz" \
         || die "gagal unduh indeks paket (APKINDEX.tar.gz)"
     V="$(tar -xzOf "$TMPW/apkindex.tar.gz" 2>/dev/null \
@@ -125,7 +126,23 @@ musl_dev() {
         curl -fSL -o "$cached" "$CDN/main/aarch64/$pkg" || die "gagal unduh $pkg"
     fi
     tar -xzf "$cached" -C "$BASE" usr/ || die "ekstraksi musl-dev gagal"
-    log "musl-dev terpasang (usr/include + usr/lib/*.a + crt*.o)"
+
+    # Header UAPI linux (linux/audit.h dll) dibutuhkan untuk build svsp statis
+    # (musl). Paket terpisah dari musl-dev; ikuti pola cache + indeks yang sama.
+    if [ ! -f "$BASE/usr/include/linux/seccomp.h" ]; then
+        local LH cached_lh="$HOME/linux-headers-cache.apk"
+        LH="$(tar -xzOf "$TMPW/apkindex.tar.gz" 2>/dev/null \
+            | grep -a -m1 -A2 '^P:linux-headers$' | grep -a '^V:' | cut -d: -f2 || true)"
+        [ -n "$LH" ] || die "linux-headers tidak ditemukan di indeks"
+        log "toolchain: linux-headers-$LH"
+        if [ ! -f "$cached_lh" ]; then
+            curl -fSL -o "$cached_lh" "$CDN/main/aarch64/linux-headers-$LH.apk" \
+                || die "gagal unduh linux-headers-$LH.apk"
+        fi
+        tar -xzf "$cached_lh" -C "$BASE" usr/ 2>/dev/null \
+            || die "ekstraksi linux-headers gagal"
+    fi
+    log "toolchain musl terpasang (crt*.o + libc.a + header + linux UAPI)"
 }
 
 # --------------------------------------------------------------- passthrough
@@ -196,8 +213,18 @@ build_binaries() {
         -fPIC -shared -O2 -nostdlib -o "$HOME/libfakeroot.so" "$SRCSHIM" \
         || die "build shim gagal (musl-dev sudah terpasang?)"
 
-    log "build svsp (supervisor USER_NOTIF)"
-    clang -O2 -o "$TMPW/svsp" "$SRCSVSP" || die "build svsp gagal"
+    # svsp = biner STATIS musl (bukan bionic dinamis): kernel exec langsung,
+    # tanpa linker host, tanpa verneed/DT_NEEDED -> kebal terhadap penolakan
+    # linker64 versi tertentu ("CANNOT LINK ... verneed[0] ..."). Pola sama
+    # dengan boot-static + compiler-rt builtins utk soft-float printf.
+    log "build svsp (supervisor USER_NOTIF, statis musl)"
+    local CRT="$(clang -print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
+    [ -f "$CRT" ] || die "compiler-rt builtins tidak ditemukan: $CRT"
+    clang --target=aarch64-alpine-linux-musl --sysroot="$BASE" -static -nostdlib -O2 \
+        -o "$TMPW/svsp" \
+        "$BASE/usr/lib/crt1.o" "$BASE/usr/lib/crti.o" "$SRCSVSP" \
+        "$BASE/usr/lib/libc.a" "$BASE/usr/lib/crtn.o" "$CRT" \
+        || die "build svsp gagal"
     strip "$TMPW/svsp"
 }
 

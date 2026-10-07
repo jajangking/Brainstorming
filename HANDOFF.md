@@ -744,3 +744,64 @@ flake sebelumnya terukur 13–23% pada sesi yang sama (kondisi termal sebanding)
 3. Status git saat commit ini: `main` berisi §11 (handoff) + §12 (SOLVED); branch arena
    `d011680` punya versi fix E5 yang salah arah — bagian od-fix-nya sudah diadopsi, bagian
    hapus `-u` tidak berbahaya dan ikut teradopsi. Tidak perlu sinkronisasi khusus.
+---
+
+# 13. svsp statis musl: penolakan linker64 device lain (CANNOT LINK verneed[0])
+
+## 13.1 Gejala
+
+Di device LAIN (selain device utama), `bootstrap.sh` gagal di lengan V2 dengan
+error yang sama persis seperti transient lama — tetapi **persisten 3/3**:
+
+```
+CANNOT LINK EXECUTABLE ".../usr/bin/svsp": cannot find "libc.so" from verneed[0] in DT_NEEDED list for ".../usr/bin/svsp"
+```
+
+Kesimpulan "sekali-kedip transient" ternyata salah untuk device umum: di sebagian
+device, linker64 **menolak binary bionic dinamis** `svsp` (yang dibuild clang
+device itu sendiri) secara deterministik. Beda versi clang/lld/linker64 antar
+device → struktur verneed/DT_NEEDED yang dihasilkan ditolak.
+
+## 13.2 Keputusan: svsp = binary STATIS musl
+
+`svsp` cuma supervisor USER_NOTIF murni syscall (stdio/stdlib/unistd/fcntl/
+poll/signal/socket/stat/linux headers — tak ada dl*, pthread, atau API bionic
+eksklusif). Karena itu bisa dibuild **statis musl** (pola `boot-static` +
+compiler-rt builtins), dan:
+
+- kernel **exec langsung** — tidak ada linker host, tidak ada verneed/DT_NEEDED
+  yang bisa ditolak linker64 mana pun;
+- berjalan di SEMUA device Android (bukan cuma yang linker64-nya menerima);
+- ukurannya ~50 KB setelah strip (vs 15 KB bionic — biaya tetap wajar).
+
+## 13.3 Perubahan
+
+- `svsp.c`: tambah `#include <stddef.h>` (musl lebih ketat: `offsetof`); komentar
+  compile diubah ke resep statis.
+- `bootstrap.sh musl_dev()`: selain musl-dev, kini menginstall paket
+  `linux-headers` (UAPI `linux/audit.h`, `filter.h`, `seccomp.h`, `openat2.h`)
+  ke wadah dengan pola cache+indeks yang sama; guard reuse diperluas.
+- `bootstrap.sh build_binaries()`: build svsp:
+  ```
+  clang --target=aarch64-alpine-linux-musl --sysroot=$BASE -static -nostdlib -O2 \
+    -o svsp $BASE/usr/lib/crt1.o $BASE/usr/lib/crti.o svsp.c \
+    $BASE/usr/lib/libc.a $BASE/usr/lib/crtn.o \
+    $(clang -print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a
+  ```
+  `libclang_rt.builtins` dibutuhkan vfprintf musl (soft-float `__addtf3` dll).
+- `fake-run`: pesan error bila svsp tak ada diarahkan ke bootstrap.sh.
+
+## 13.4 Verifikasi empiris (device utama, sesudah fix)
+
+```
+V1 LD_PRELOAD cat /etc/alpine-release          : 3.24.2 ✓
+V2 --svsp cat (bionic dinamis) di bawah svsp statis : 3.24.2 ✓
+V3 boot-static (anak statis)                   : 3.24.2 BOOT-STATIC-OK ✓
+svsp langsung: --base + loader wadah + busybox : VERSION_ID=3.24.2 ✓
+sh -c multi-perintah + subshell (id/cat/ls)    : ✓
+tree -L 1 / + figlet                            : ✓
+build: ELF 64-bit statically linked, ~50 KB     ✓
+```
+
+Instalasi ulang penuh `./install.sh` harus hijau; device yang tadinya menolak
+svsp bionic kini tak bisa menolak svsp statis (tanpa linker = tanpa penolakan).

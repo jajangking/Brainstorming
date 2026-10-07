@@ -24,8 +24,13 @@
  *   LD arch; JEQ(AUDIT_ARCH_AARCH64, jt=1, jf=0); RET KILL
  *   -> match: lompati KILL (lanjut); mismatch: jatuh ke KILL.
  *
- * Compile (host/bionic):
- *   clang -O2 -o svsp svsp.c
+ * Compile (statis musl — lintas device, tanpa linker/bionic):
+ *   clang --target=aarch64-alpine-linux-musl --sysroot=$ROOTFS -static -nostdlib -O2 \
+ *     -o svsp $ROOTFS/usr/lib/crt1.o $ROOTFS/usr/lib/crti.o svsp.c \
+ *     $ROOTFS/usr/lib/libc.a $ROOTFS/usr/lib/crtn.o \
+ *     $(clang -print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a
+ * Binary statis => kernel exec langsung, tak ada verneed/DT_NEEDED yang bisa
+ * ditolak linker64 device ("CANNOT LINK ... libc.so from verneed[0]").
  * Pakai:
  *   svsp --base=$ROOTFS $ROOTFS/lib/ld-musl-patched.so.1 $ROOTFS/bin/busybox cat /etc/os-release
  *   svsp --base=$ROOTFS /path/ke/binary-STATIS arg...
@@ -34,6 +39,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
