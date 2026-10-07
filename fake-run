@@ -1,39 +1,43 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# fake-run — jalankan binary musl di "wadah palsu" (fakechroot) tanpa root,
-# tanpa proot, tanpa chroot. Native speed.
+# fake-run — runner UNIVERSAL wadah palsu (fakechroot) tanpa root, tanpa proot.
 #
-#   fake-run [--loader=FILE] [ENV=val ...] <program> [args...]
+#   fake-run [--svsp] [--loader=FILE] [--shim=FILE] [--base=DIR] [ENV=val ...] <program> [args...]
 #
-# Yang dilakukan:
-#   1. cd ke FAKE_BASE (rootfs Alpine).
-#   2. tulis ulang env: PATH/HOME/USER/SHELL/TMPDIR ala chroot.
-#   3. buang LD_PRELOAD/LD_LIBRARY_PATH bionic Termux (bentrok dgn musl).
-#   4. resolve <program>: absolut -> FAKE_BASE+path (kecuali /data /dev /proc /sys);
-#      relatif -> cari di dalam FAKE_BASE dulu.
-#   5. eksekusi via musl loader (default: loader patched, aman seccomp).
+# Dua jalur, otomatis dipilih berdasar jenis binary:
+#   - DINAMIS (punya PT_INTERP)  -> jalur cepat: loader musl patched (seccomp-safe)
+#                                   + LD_PRELOAD libfakeroot.so (rewrite path).
+#   - STATIS (tanpa PT_INTERP)   -> LD_PRELOAD TIDAK berlaku -> otomatis pakai
+#                                   supervisor seccomp USER_NOTIF (svsp):
+#                                   filter kernel tambahan, parent bebas-filter
+#                                   me-rewrite path di level syscall.
+#   - --svsp                     -> paksa pakai supervisor untuk apa pun.
 #
-# Isolasi path dilakukan libfakeroot.so (LD_PRELOAD): semua path absolut
-# dari program di-rewrite ke dalam FAKE_BASE. Program TIDAK melihat sistem
-# host (kecuali jalur yang sengaja di-symlink di dalam wadah).
+# Isolasi path: absolut -> FAKE_BASE+path; /dev /proc /sys passthrough.
+# set*id tetap dinetralkan oleh shim SIGSYS (libfakeroot.so) pada kedua jalur.
 
 set -euo pipefail
 
 HOME_BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
 SHIM="${FAKE_SHIM:-$HOME/libfakeroot.so}"
 LOADER="${FAKE_LOADER:-$HOME/alpine-rootfs/lib/ld-musl-patched.so.1}"
+SVSP="${FAKE_SVSP:-}"
+MODE=auto
 
-# ambil opsi --loader dan ENV=val di depan
+# opsi --loader/--shim/--base/--svsp dan ENV=val di depan
 extra_env=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --loader=*) LOADER="${1#--loader=}"; shift ;;
+        --shim=*)   SHIM="${1#--shim=}"; shift ;;
         --base=*)   HOME_BASE="${1#--base=}"; shift ;;
+        --svsp)     MODE=svsp; shift ;;
+        --ldpreload) MODE=ldpreload; shift ;;
         *=*)        extra_env+=("$1"); shift ;;
         *)          break ;;
     esac
 done
 
-[ $# -ge 1 ] || { echo "pemakaian: fake-run [--loader=FILE] [ENV=val ...] <program> [args...]"; exit 2; }
+[ $# -ge 1 ] || { echo "pemakaian: fake-run [--svsp] [--loader=FILE] [ENV=val ...] <program> [args...]"; exit 2; }
 prog="$1"; shift
 
 # resolve program
@@ -51,18 +55,60 @@ case "$prog" in
         [ -n "$host" ] || host="$prog"
         ;;
 esac
-
-[ -e "$SHIM" ] || { echo "fake-run: shim tak ada: $SHIM"; exit 1; }
-[ -x "$LOADER" ] || { echo "fake-run: loader tak ada: $LOADER"; exit 1; }
 [ -e "$host" ] || { echo "fake-run: program tak ada: $host"; exit 1; }
 
-# HOME/TMPDIR/PWD memakai path host-absolut yang SUDAH ada di dalam base.
-# Ini membuat path-pun tetap masuk wadah MESKI dipanggil lewat syscall mentah
-# (bun/node/zig mem-bypass LD_PRELOAD utk sebagian openat), sekaligus menjaga
-# ilusi "/root", "/tmp", "/" bagi yang memakai libc (lewat trim realpath/getcwd).
+# deteksi ELF dinamis: ada PT_INTERP? (readelf bila ada; fallback od portabel)
+is_dynamic() {
+    local f="$1"
+    if command -v readelf >/dev/null 2>&1; then
+        readelf -l "$f" 2>/dev/null | grep -q 'Requesting program interpreter'
+        return $?
+    fi
+    # parse program-header ELF64 murni (tanpa dependensi)
+    local hdr=( $(od -An -vu1 -N64 "$f" 2>/dev/null) )
+    [ ${#hdr[@]} -ge 58 ] || return 1
+    local phoff=0 phesz phnum i j t off
+    for i in 32 33 34 35 36 37 38 39; do
+        phoff=$(( phoff + (${hdr[$i]} << (8*(i-32))) ))
+    done
+    phesz=$(( ${hdr[54]} + (${hdr[55]} << 8) ))
+    phnum=$(( ${hdr[56]} + (${hdr[57]} << 8) ))
+    for i in $(seq 0 $((phnum - 1))); do
+        off=$((phoff + i * phesz))
+        local ph=( $(od -An -vu1 -j "$off" -N "$phesz" "$f" 2>/dev/null) )
+        [ ${#ph[@]} -ge 4 ] || return 1
+        t=$(( ${ph[0]} + (${ph[1]} << 8) + (${ph[2]} << 16) + (${ph[3]} << 24) ))
+        [ "$t" -eq 3 ] && return 0      # PT_INTERP
+    done
+    return 1
+}
+
+if [ "$MODE" = auto ]; then
+    if is_dynamic "$host"; then MODE=ldpreload; else MODE=svsp; fi
+fi
+
 mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true
 
 cd "$HOME_BASE"
+
+if [ "$MODE" = svsp ]; then
+    # ===== jalur supervisor USER_NOTIF (statis / --svsp) =====
+    [ -n "$SVSP" ] || for d in "$(dirname "$0")" "$HOME" "$HOME/Brainstorming"; do
+        [ -x "$d/svsp" ] && { SVSP="$d/svsp"; break; }
+    done
+    [ -n "$SVSP" ] || { echo "fake-run: svsp tak ada. Bangun dulu: clang -O2 -o svsp svsp.c"; exit 1; }
+    [ -x "$SVSP" ] || { echo "fake-run: svsp tak dapat dieksekusi: $SVSP"; exit 1; }
+    exec env -i \
+      -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
+      FAKE_BASE="$HOME_BASE" \
+      TERM="${TERM:-xterm-256color}" \
+      "${extra_env[@]}" \
+      "$SVSP" --base="$HOME_BASE" "$host" "$@"
+fi
+
+# ===== jalur cepat LD_PRELOAD (binary dinamis) =====
+[ -e "$SHIM" ] || { echo "fake-run: shim tak ada: $SHIM"; exit 1; }
+[ -x "$LOADER" ] || { echo "fake-run: loader tak ada: $LOADER"; exit 1; }
 
 exec env -i \
   -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_PRELOAD_32 \
