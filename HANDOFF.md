@@ -886,11 +886,13 @@ IPv4-first, NXDOMAIN 0.01s; `ping example.com` 0% loss; `wget` nama rc=0;
   root → `num_dir_update_errors`. Fakeroot-style: pretend success (wadah
   single-user). Builtin `busybox --install -s` trigger kini tereksekusi.
 
-## 17. ⚠️ BUG AKTIF — lanjut sesi berikutnya
+## 17. ✅ SOLVED — ditutup di ronde 4 (device: selftest 0 FAIL, 2026-10-07)
 
-> **UPDATE §18:** butir 1 & 2 sudah di-root-cause dan diperbaiki di kode
-> (svsp.c, libfakeroot.c, apk-doctor). Verifikasi device masih wajib —
-> lihat checklist §18.5.
+> **UPDATE FINAL §23:** semua butir 1 & 2 terverifikasi hijau di device lewat
+> `./selftest` (0 FAIL), termasuk kriteria penentu `--svsp apk add acl`
+> transaksi nyata rc=0. Butir 3 (device-2) & 4 (bersih-bersih) lihat §23.3.
+> Jejak root-cause & fix: §18 (env-merge + flag basi), §19 (shebang wrapper),
+> §20 (/proc/self), §22 (script_absolutize).
 
 1. **`apk add/del` selalu "1 error" (rc=1) SILENT** — tanpa baris ERROR, tanpa
    pesan "failed to write database". Muncul di SETIAP transaksi tulis DB
@@ -1346,3 +1348,53 @@ cd ~/Brainstorming && git pull && ./install.sh
 Kriteria lulus: **0 FAIL** — khususnya `svsp: apk add $PKG rc=0` kini
 transaksi nyata. Bila masih ada FAIL, sertakan output penuh + `SVSP_DEBUG=1
 fake-run --svsp apk add --no-cache acl 2>&1 | tail -40`.
+
+## 23. ✅ PENUTUPAN RESMI — bug §17 selesai (ronde 4, device: 0 FAIL)
+
+### 23.1 Hasil ronde 4 (device-feedback `a60513b`)
+
+`./selftest` versi §22.5 dijalankan di device-1 (Android 16, kernel 6.12):
+
+```
+== RINGKASAN: 0 FAIL ==
+```
+
+Semua 17 check PASS, termasuk dua kriteria penentu yang gagal di ronde
+sebelumnya:
+- `svsp: apk add acl rc=0` — **transaksi NYATA** (paket di-purge dulu oleh
+  selftest versi baru; trigger busybox tereksekusi via wrapper svsp).
+- `apk-doctor: DB bersih` — rantai flag basi `f:s` tak lagi terbentuk karena
+  trigger svsp kini sukses.
+
+Verifikasi independen agent lokal di luar selftest (commit message):
+`fake-run --svsp apk add --no-cache acl` transaksi nyata → **rc=0**
+(`script_absolutize` bekerja: argv[0] absolut → `busybox --install` jalan).
+
+### 23.2 Peta lengkap fix §17 (untuk arsip)
+
+| Bug | Root cause akhir | Fix | Verifikasi |
+|---|---|---|---|
+| "1 error" silent (§17.1) | flag `f:`/`s:` basi dipersist DB (`commit.c:484`) | `apk-doctor --clear-broken` + trigger tak lagi gagal | device ronde 1-4 |
+| trigger rc=127 (§17.1b) | env-merge pakai `environ` live (habis di-`clearenv`) + interposer bolong | snapshot env constructor; posix_spawn(p)/fexecve/execveat/execle/execlp | device ronde 1 |
+| svsp "failed to write database" (§17.2) | O_TMPFILE path relatif lolos → publish linkat butuh CAP_DAC_READ_SEARCH | mask O_TMPFILE + pin dirfd child + EISDIR → fallback `.tmp` | device ronde 1 |
+| svsp trigger ENOENT (§19) | kernel host resolve shebang ke root host | `shebang_wrap()` wrapper `#!/system/bin/sh` | device ronde 2 |
+| `CANNOT LINK /bin/sh` (§19) | passthrough prefix host kurang | `/system /apex /vendor ...` | device ronde 2 |
+| `'bin/busybox' not absolute` (§20-22) | busybox readlink(`/bin/busybox`) selalu EINVAL → fallback argv[0]; buffer 13 byte → fallback relatif | `script_absolutize()` di `.orig-svsp` | device ronde 4 |
+| Regresi SBARGS fake-run | subshell `$(shebang_parse)` | `SHEBANG_INTERP` | device ronde 2 |
+| `env -i` unbound HOME/PREFIX | `set -u` | default eksplisit | device ronde 2-3 |
+
+### 23.3 Yang TETAP terbuka (di luar jangkauan agent)
+
+1. **Verifikasi device-2** (§17 butir 3) — butuh device fisik kedua; agent
+   lokal hanya punya satu device. Bila device-2 tersedia: `git pull &&
+   ./install.sh && ./selftest`.
+2. Backup `installed.bak-doctor.*` di `$BASE/lib/apk/db/` — aman dihapus
+   kapan saja (hanya arsip perbaikan flag).
+3. RC=139 tunggal di probe agent (ronde 3) — tak berulang; tak ada aksi.
+
+### 23.4 Arah berikutnya (bila lanjut)
+
+- ARENA-REPLY §7(a) rootless DB write via `linkat(AT_EMPTY_PATH)`: nilai
+  tambahnya kecil menurut bukti device (O_TMPFILE mask sudah menutup gejala).
+- Pembersihan lanjutan / paket tambahan wadah; fitur baru dari pemilik.
+- Keputusan distro: TETAP Alpine (§21.1).
