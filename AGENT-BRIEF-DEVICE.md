@@ -175,3 +175,33 @@ Tugas: `git pull && ./install.sh && ./selftest | tee
 device-feedback/selftest-$(date +%F).txt` — target **0 FAIL**. Aturan main
 sama (jujur, N/A bila tak bisa). Bila FAIL, lampirkan juga `SVSP_DEBUG=1
 fake-run --svsp apk add --no-cache acl 2>&1 | tail -40`.
+
+---
+
+# RONDE 5 — fix OpenCode/Bun spawn (HANDOFF §24)
+
+Kasus baru dari pemilik: `opencode --help`/`serve` manual ✅ tapi spawn
+child (`OpenCode spawn serve`, `--standalone`) ❌. Di sandbox arena, dua
+mode kegagalan svsp sudah dibuktikan & diperbaiki:
+
+1. `write_mem` kini fallback ke `/proc/<pid>/mem` → execve path di memori
+   read-only (.rodata — pola khas Zig/Bun) kini ter-rewrite.
+2. Fallback path-relatif execve/chdir kini menghitung dari cwd AKTUAL child
+   (dulu mengasumsikan cwd=base); chdir absolut kini benar-benar bekerja.
+
+**Tugas (berurutan):**
+1. `cd ~/Brainstorming && git pull && ./install.sh` (rebuild svsp).
+2. Ulangi matriks opencode (keempat kasus). Laporkan apa adanya.
+3. Bila masih ada ❌, WAJIB lampirkan di feedback:
+   - perintah PERSIS peluncuran opencode (fake-run? alpine? mode apa?)
+   - `SVSP_DEBUG=1 fake-run --svsp $HOME/alpine-rootfs/usr/local/bin/opencode --standalone 2>&1 | tail -60`
+   - baris `[svsp]` yang menyebut `execve`/`muat tak cukup`/`write_mem`
+   - teks error persis dari OpenCode/Bun saat spawn gagal.
+4. Cek juga hipotesis jalur: bila selama ini opencode dijalankan lewat
+   loader patched + LD_PRELOAD (bukan svsp), coba via svsp — binary statis
+   Bun lolos dari LD_PRELOAD sehingga spawn child-nya tak pernah
+   ditranslasi. `readelf -l .../opencode | grep -i interp` (kosong = statis
+   = wajib jalur svsp).
+
+Aturan main sama: jujur, N/A bila tak bisa, commit feedback ke
+`device-feedback/ronde5.md`.

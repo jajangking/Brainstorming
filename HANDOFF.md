@@ -1398,3 +1398,61 @@ Verifikasi independen agent lokal di luar selftest (commit message):
   tambahnya kecil menurut bukti device (O_TMPFILE mask sudah menutup gejala).
 - Pembersihan lanjutan / paket tambahan wadah; fitur baru dari pemilik.
 - Keputusan distro: TETAP Alpine (§21.1).
+
+## 24. KASUS BARU — OpenCode (Bun) spawn child gagal di wadah
+
+Laporan pemilik (2026-10-08), matriks gejala di device:
+
+```
+opencode --help          ✅
+opencode serve (manual)  ✅
+OpenCode spawn serve     ❌
+opencode --standalone    ❌
+```
+
+Hipotesis pemilik: child yang dibuat Bun mewarisi "environment custom"
+(loader/library Alpine + libfakeroot.so). **Analisis arena:** di jalur svsp
+env justru sudah disanitasi (`svsp` me-`unsetenv` LD_* sebelum exec target;
+fake-run svsp tak men-set LD_PRELOAD), jadi warisan env tak merusak binary
+statis. Tersangka sebenarnya ada di translasi path syscall child.
+
+### 24.1 Dua mode kegagalan yang DIBUKTIKAN di sandbox (svsp x86, repro C statis
+meniru pola Zig/Bun: fork + execve syscall mentah)
+
+1. **Memori read-only (.rodata)** — Zig/Bun mengoper path `execve` sebagai
+   literal compile-time → `process_vm_writev` ditolak → svsp menjawab
+   `-ENOENT` → spawn gagal padahal file ada. **FIX:** fallback `write_mem`
+   via `pwrite` ke `/proc/<pid>/mem` (hak ptrace sama; menembus proteksi
+   halaman — terbukti: uji `PWRITE-RODATA-OK`). Kasus repro C: dulu exit 127
+   errno=2 → kini CHILD-OK.
+2. **Asumsi cwd=base pada fallback path-relatif** — fallback `pbuf+1`
+   (C_EXEC) hanya benar selama cwd child = base. Begitu app chdir (Bun ke
+   direktori proyek; chdir passthrough `/data/...` pun memindahkan cwd),
+   execve relatif salah resolve. Ditemukan juga: **C_CHDIR absolut tak
+   pernah muat** (rewrite selalu +baselen) → selama ini silent no-op
+   (cwd terpaku di base — "kebetulan" menyelamatkan fallback lama, tapi
+   membohongi app). **FIX:** helper `rel_from_cwd()` — hitung path relatif
+   dari cwd AKTUAL child (`readlink /proc/<pid>/cwd`) ke target; dipakai di
+   C_EXEC dan C_CHDIR sebelum fallback lama. Uji D (chdir `/root/proj` kini
+   NYATA + execve dari cwd baru) → CHILD-OK.
+
+Regresi build baru: rantai wrap ronde-4 (`BUSYBOX-INSTALL-OK argv[0]`
+absolut, idempoten) + execve relatif = tetap hijau. Cabang O_TMPFILE tak
+disentuh diff ini (diverifikasi ulang via selftest `apk add` transaksi nyata
+di device).
+
+### 24.2 Yang BELUM pasti (butuh bukti device)
+
+- Pesan error pasti dari spawn yang gagal (belum pernah dikirim).
+- Jalur mana yang dipakai menjalankan opencode: bila lewat jalur
+  LD_PRELOAD/loader patched (bukan svsp), binary STATIS Bun lolos dari
+  interposer entirely (syscall mentah) → child execve sampai ke kernel
+  dengan path wadah → ENOENT. Fix untuk varian ini = jalankan via svsp
+  (`fake-run --svsp` / auto).
+- Bun juga bisa memakai buffer terlalu kecil untuk `../` relatif — bila
+  masih gagal, log SVSP_DEBUG akan menunjukkan "muat tak cukup".
+
+### 24.3 Briefing device = RONDE 5 (AGENT-BRIEF-DEVICE.md)
+
+Rebuild svsp (`./install.sh`), ulangi matriks opencode, tangkap
+`SVSP_DEBUG=1` bila masih ada yang ❌.

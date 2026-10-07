@@ -108,7 +108,69 @@ static ssize_t read_mem(pid_t pid, void *addr, void *buf, size_t len) {
 }
 static ssize_t write_mem(pid_t pid, void *addr, const void *buf, size_t len) {
     struct iovec lo = { (void *)buf, len }, ro = { addr, len };
-    return process_vm_writev(pid, &lo, 1, &ro, 1, 0);
+    ssize_t r = process_vm_writev(pid, &lo, 1, &ro, 1, 0);
+    if (r == (ssize_t)len) return r;
+    /* Fallback halaman read-only (.rodata): Zig/Bun mengoper path execve
+     * sebagai literal compile-time -> process_vm_writev ditolak. Tulis via
+     * /proc/<pid>/mem: hak ptrace sama, tembus proteksi halaman (terbukti
+     * di uji sandbox PWRITE-RODATA-OK; kasus OpenCode/Bun §24 HANDOFF). */
+    int sav = errno;
+    char mp[64];
+    snprintf(mp, sizeof mp, "/proc/%d/mem", (int)pid);
+    int fd = open(mp, O_RDWR);
+    if (fd >= 0) {
+        ssize_t w = pwrite(fd, buf, len, (off_t)(uintptr_t)addr);
+        if (w == (ssize_t)len) { close(fd); return w; }
+        sav = errno;
+        close(fd);
+    }
+    errno = sav;
+    return r;
+}
+
+/* Path relatif dari cwd AKTUAL child ke path host `to` (tulis ke relbuf).
+ * Return 0 sukses. Fallback rewrite execve/chdir dulu mengasumsikan
+ * cwd=base — salah begitu app chdir (Bun/OpenCode ke direktori proyek,
+ * atau chdir passthrough). Baca cwd via /proc/<pid>/cwd lalu susun
+ * segmen "../" + sisa. */
+static int rel_from_cwd(pid_t pid, const char *to, char *relbuf, size_t cap) {
+    char cwd[4096], lpath[64];
+    snprintf(lpath, sizeof lpath, "/proc/%d/cwd", (int)pid);
+    ssize_t cl = readlink(lpath, cwd, sizeof cwd - 1);
+    if (cl <= 0) return -1;
+    cwd[cl] = 0;
+    const char *c = cwd, *t = to;
+    for (;;) {                                   /* lewati prefix bersama */
+        while (*c == '/') c++;
+        while (*t == '/') t++;
+        const char *ce = strchr(c, '/'); if (!ce) ce = c + strlen(c);
+        const char *te = strchr(t, '/'); if (!te) te = t + strlen(t);
+        size_t csl = (size_t)(ce - c), tsl = (size_t)(te - t);
+        if (csl != tsl || (csl && memcmp(c, t, csl) != 0)) break;
+        c = ce; t = te;
+        if (!*c && !*t) {                        /* direktori sama */
+            if (cap < 2) return -1;
+            relbuf[0] = '.'; relbuf[1] = 0; return 0;
+        }
+    }
+    size_t off = 0;
+    while (*c) {                                 /* tiap sisa cwd = "../" */
+        while (*c == '/') c++;
+        if (!*c) break;
+        if (off + 3 >= cap) return -1;
+        memcpy(relbuf + off, "../", 3); off += 3;
+        const char *ce = strchr(c, '/');
+        c = ce ? ce : c + strlen(c);
+    }
+    while (*t == '/') t++;
+    size_t tl = strlen(t);
+    if (tl == 0) {
+        if (off < 3 || off + 1 > cap) return -1;
+        relbuf[off - 1] = 0; return 0;           /* "../.." tanpa slash ujung */
+    }
+    if (off + tl + 1 > cap) return -1;
+    memcpy(relbuf + off, t, tl + 1);
+    return 0;
 }
 
 /* baca string hingga max, kembalikan panjang (tiada NUL -> -1).
@@ -890,13 +952,18 @@ static void handle(int listener, const struct seccomp_notif *req) {
                       SECCOMP_USER_NOTIF_FLAG_CONTINUE);
             break;
         }
-        /* rewrite path di memori child; absolut dulu, fallback relatif */
+        /* rewrite path di memori child; absolut dulu, lalu relatif thd cwd
+         * AKTUAL child (§24: asumsi cwd=base salah begitu app chdir). */
         size_t newlen = strlen(pout);
         const char *w;
+        char relbuf[4096];
         if (newlen <= (size_t)oldlen) {
             w = pout;
+        } else if (rel_from_cwd(pid, pout, relbuf, sizeof relbuf) == 0 &&
+                   strlen(relbuf) <= (size_t)oldlen) {
+            w = relbuf;
         } else if (pbuf[0] == '/' && strlen(pbuf + 1) <= (size_t)oldlen) {
-            w = pbuf + 1;            /* relatif ke cwd child (awalnya base) */
+            w = pbuf + 1;            /* upaya terakhir: asumsi cwd=base */
         } else {
             /* tak muat di buffer path asli -> tak bisa rewrite */
             DBG("execve muat tak cukup: %s\n", pout);
@@ -916,14 +983,25 @@ static void handle(int listener, const struct seccomp_notif *req) {
     }
     case C_CHDIR: {
         size_t newlen = strlen(pout);
+        char relbuf[4096];
+        const char *w = NULL;
         if (newlen <= (size_t)oldlen) {
-            if (write_mem(pid, pathp, pout, newlen + 1) == 0)
+            w = pout;
+        } else if (rel_from_cwd(pid, pout, relbuf, sizeof relbuf) == 0 &&
+                   strlen(relbuf) <= (size_t)oldlen) {
+            w = relbuf;
+        } else if (pbuf[0] == '/' && strlen(pbuf + 1) <= (size_t)oldlen) {
+            w = pbuf + 1;
+        }
+        if (w) {
+            if (write_mem(pid, pathp, w, strlen(w) + 1) == 0)
                 send_resp(listener, req->id, 0, 0,
                           SECCOMP_USER_NOTIF_FLAG_CONTINUE);
             else
                 send_resp(listener, req->id, 0, -EFAULT, 0);
         } else {
-            /* tak muat: no-op (cwd child tak berubah) */
+            /* tetap tak muat: no-op (status quo §22; berubah jadi error
+             * berisiko memecah script `cd` yang sebelumnya "jalan"). */
             DBG("chdir muat tak cukup: %s\n", pout);
             send_resp(listener, req->id, 0, 0, 0);
         }
