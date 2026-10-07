@@ -35,7 +35,11 @@ if [ $# -eq 0 ]; then
     echo "Ketik 'exit' untuk keluar"
     echo
     exec env -u LD_PRELOAD "$FR" --base="$BASE" /bin/sh -l
+elif [ "$1" = "-c" ]; then
+    # alpine -c "command" — jalankan command string di dalam wadah
+    shift
+    exec env -u LD_PRELOAD "$FR" --base="$BASE" /bin/sh -c "$*"
 else
-    # Jalankan command
+    # alpine <program> [args...] — program di-resolve via PATH wadah (fake-run)
     exec env -u LD_PRELOAD "$FR" --base="$BASE" "$@"
 fi
