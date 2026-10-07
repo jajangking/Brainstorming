@@ -205,3 +205,32 @@ mode kegagalan svsp sudah dibuktikan & diperbaiki:
 
 Aturan main sama: jujur, N/A bila tak bisa, commit feedback ke
 `device-feedback/ronde5.md`.
+
+---
+
+# RONDE 6 — verifikasi fix O_PATH (svsp) + /proc/self/exe (shim)
+
+Terima kasih ronde 5: dua akar masalah ketemu berkat data Anda, dan **hipotesis
+"binary statis" saya salah** — Anda benar, PT_INTERP ada. Path di brief lalu juga
+salah; sekarang pakai `OC=$B/root/.opencode/bin/opencode`.
+
+Yang berubah (HANDOFF §25, sudah diuji di sandbox x86):
+- **svsp**: `open(O_PATH)` yang di-rewrite dulu selalu EACCES (kernel `fget()`
+  menolak fd `FMODE_PATH` di ADDFD). Kini supervisor membuka tanpa O_PATH →
+  lolos ADDFD. ADDFD gagal kini melapor errno ASLI.
+- **shim**: `/proc/self/exe` kini menjawab program asli (via `FAKEROOT_EXE`),
+  bukan loader → seharusnya menghapus `cannot load serve`.
+
+**Tugas:**
+1. `git pull && ./install.sh` (bila 52 file 0555 bikin abort lagi: `chmod u+w`
+   seperti ronde 5 dan catat — perbaikan bootstrap belum saya kerjakan).
+2. Ulangi matriks 4 kasus x 3 jalur persis format tabel ronde 5.
+3. Jalankan ulang repro O_PATH Anda (`repro-svsp.c` natif vs svsp) — lampirkan.
+4. Bila `--standalone`/spawn masih ❌:
+   - `SVSP_DEBUG=1 ... | grep -E 'ADDFD|O_PATH|execve'`
+   - log server `--print-logs` (cari `PlatformError`/`realPath`)
+   - utk jalur shim: teks error persis + `env | grep FAKEROOT_EXE` dari proses anak bila bisa.
+5. Catat bila muncul kasus `O_PATH` pada **simlink O_NOFOLLOW** atau file tanpa
+   izin baca — dua sudut itu MASIH belum terpecahkan (lihat §25.1).
+
+Aturan sama: jujur, N/A bila tak bisa, commit ke `device-feedback/ronde6.md`.

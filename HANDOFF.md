@@ -1456,3 +1456,67 @@ di device).
 
 Rebuild svsp (`./install.sh`), ulangi matriks opencode, tangkap
 `SVSP_DEBUG=1` bila masih ada yang ❌.
+
+## 25. RONDE 5 — dua akar masalah OpenCode DITEMUKAN & DIPERBAIKI
+
+Feedback device `device-feedback/ronde5.md` (basis `a0f575a`) sangat menentukan:
+fix §24 benar tapi **bukan** penyebab kegagalan device. Matriks device: `--help`
+dan `serve` manual ✅ di ketiga jalur; `spawn serve` + `--standalone` ❌ di svsp
+(HTTP 500) dan ❌ di shim (loader). Dua bug berbeda:
+
+### 25.1 svsp — O_PATH tak bisa lewat ADDFD (→ EACCES palsu)
+
+Device: `[svsp] ADDFD nr=56 -> fd=-1 errno=9`, dijawab `-EACCES` buta
+(`svsp.c:885`). Log server OpenCode: `PermissionDenied: FileSystem.realPath (/)
+... EACCES: permission denied, lstat '/'` → `/api/fs/list` & `/api/location`
+HTTP 500 → TUI mati.
+
+Sebab (direproduksi 1:1 **di sandbox x86**, jadi ini batasan kernel umum, bukan
+khas Android): `SECCOMP_IOCTL_NOTIF_ADDFD` memakai `fget(srcfd)` di kernel, dan
+`fget()` **menolak file `FMODE_PATH`**. Jadi setiap `open(..., O_PATH)` yang
+path-nya di-rewrite (dikerjakan supervisor lalu dikirim via ADDFD) pasti gagal
+`EBADF` → child dapat EACCES. Open O_PATH passthrough (`/data/...`) lolos karena
+dijalankan child sendiri — persis pola terbalik yang dilaporkan device.
+
+**FIX:** supervisor membuka tanpa `O_PATH` (`O_RDONLY`, flag lain dipertahankan)
+→ fd biasa lolos ADDFD, dan tetap sah untuk `fstat`, `readlink /proc/self/fd/N`,
+serta sebagai `dirfd` `openat()`. Plus: `ADDFD` gagal kini membalas **errno asli**
+(bukan `-EACCES` buta yang menyamarkan diagnosis).
+
+Bukti sandbox sebelum→sesudah: `O_PATH file/dir//` EACCES(13) → OK.
+
+**Batas yang diakui (diuji, belum terpecahkan):** degradasi ini tak menolong
+2 sudut — `O_PATH|O_NOFOLLOW` pada **simlink** (jadi ELOOP) dan file **tanpa izin
+baca** bagi supervisor (jadi EACCES). Reopen via `/proc/self/fd` sudah dicoba dan
+gagal (objeknya sendiri tak bisa dibuka O_RDONLY). Bila OpenCode menyentuh kasus
+itu, akan muncul di ronde 6.
+
+### 25.2 shim — `/proc/self/exe` menunjuk LOADER (→ "cannot load serve")
+
+Device: `ld-musl-patched.so.1: cannot load serve: No such file or directory`.
+Analisis: di jalur ldpreload kita menjalankan `loader /path/opencode args...`,
+sehingga `/proc/self/exe` proses itu = **loader**. Bun memakai `execPath`
+(= `/proc/self/exe`) untuk men-spawn dirinya sendiri → `posix_spawn(loader,
+["ld-musl-patched.so.1","serve",...])` → loader menganggap `serve` sebagai nama
+program → error persis di atas. Keluarga bug §20.1 (`/proc/self/*`), varian shim.
+
+**FIX (libfakeroot.c):**
+1. Saat merangkai exec/spawn lewat loader, wariskan `FAKEROOT_EXE=<hostpath>`.
+2. `readlink("/proc/self/exe")` dan `/proc/<pid-sendiri>/exe` menjawab
+   `FAKEROOT_EXE` bila ada (verifikasi sandbox: `exe=/opt/alpine/root/.opencode/
+   bin/opencode`, dan tanpa env tetap apa adanya).
+3. Jaring pengaman `fk_fix_loader_argv()`: bila ada yang meng-exec/spawn **loader
+   langsung** dengan `argv[1]` yang bukan path absolut, sisipkan kembali program
+   sebenarnya.
+
+### 25.3 Temuan device lain yang saya terima
+
+- **bootstrap.sh hard-abort** gara-gara 52 file `.codex` mode 0555 (read-only) →
+  `pinterp` EACCES. Device menambal manual dgn `chmod u+w`. **Belum saya ubah di
+  kode** — saran device (chmod u+w dalam loop pinterp, atau skip+warn) saya setujui
+  dan masuk antrean ronde 6.
+- **Path di brief saya salah**: binary ada di `$BASE/root/.opencode/bin/opencode`
+  (dinamis musl, v2.0.24), bukan `usr/local/bin`. Hipotesis "statis" saya **gugur** —
+  device benar, PT_INTERP ada.
+- **"Hang" spawn = konflik port 49374** dengan service opencode HOST, bukan bug
+  wadah. Natif + port bebas = spawn sukses penuh.

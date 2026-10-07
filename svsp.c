@@ -820,6 +820,21 @@ static void handle(int listener, const struct seccomp_notif *req) {
         int tmpfile_req = SVSP_HAS_TMPFILE(oflags);
         oflags = SVSP_MASK_TMPFILE(oflags);
 
+        /* §25: O_PATH TIDAK BISA dikirim lewat SECCOMP_IOCTL_NOTIF_ADDFD.
+         * Kernel memakai fget(srcfd) yang menolak file FMODE_PATH -> ioctl
+         * gagal EBADF dan dulu dijawab -EACCES buta. Akibatnya Bun/OpenCode
+         * (realPath('/') pakai O_PATH) dapat EACCES -> ConfigDiscovery gagal
+         * -> HTTP 500. Terbukti di device (ronde 5) DAN di sandbox x86.
+         * Solusi: buka tanpa O_PATH (O_RDONLY) — fd biasa bisa lewat ADDFD
+         * dan tetap sah utk fstat/readlink /proc/self/fd/N/openat(dirfd). */
+        int path_req = 0;
+#ifdef O_PATH
+        if (oflags & O_PATH) {
+            path_req = 1;
+            oflags = (oflags & ~(__u64)O_PATH & ~(__u64)O_ACCMODE) | O_RDONLY;
+        }
+#endif
+
         /* Path RELATIF yang harus dieksekusi supervisor (kasus O_TMPFILE):
          * dirfd milik child tak berarti di sini — pin lewat /proc/<pid>/fd/N. */
         if (tmpfile_req && nr == SYS_openat && pout[0] != '/' &&
@@ -862,6 +877,12 @@ static void handle(int listener, const struct seccomp_notif *req) {
 #endif
             fd = openat(atfd, pout, (int)oflags, (int)a[3]);
 
+        /* Batas yang DIAKUI (uji sandbox): dua sudut tak tertolong oleh
+         * degradasi ini — simlink dgn O_PATH|O_NOFOLLOW (jadi ELOOP) dan
+         * file tanpa izin baca utk supervisor (jadi EACCES). Reopen lewat
+         * /proc/self/fd sudah dicoba dan TIDAK membantu (objeknya sendiri
+         * tak bisa dibuka O_RDONLY). Belum ada jalan lain via ADDFD. */
+
         if (atfd_ref >= 0) { close(atfd_ref); atfd_ref = -1; }
 
         if (fd >= 0 && tmpfile_req) {
@@ -880,9 +901,14 @@ static void handle(int listener, const struct seccomp_notif *req) {
         add.srcfd = fd;
         add.newfd = 0;          /* kernel pilih fd terendah di child */
         int nfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
-        DBG("ADDFD nr=%ld -> fd=%d errno=%d\n", nr, nfd, errno);
-        if (nfd < 0)
-            send_resp(listener, req->id, 0, -EACCES, 0);
+        DBG("ADDFD nr=%ld -> fd=%d errno=%d%s\n", nr, nfd, errno,
+            path_req ? " (O_PATH didegradasi ke O_RDONLY)" : "");
+        if (nfd < 0) {
+            /* errno ASLI, jangan -EACCES buta (ronde 5: menyamarkan EBADF
+             * dan menyesatkan diagnosis berhari-hari). */
+            int e = errno > 0 ? errno : EACCES;
+            send_resp(listener, req->id, 0, -e, 0);
+        }
         close(fd);
         break;
     }

@@ -461,6 +461,58 @@ static char **fk_ensure_wadah_env(char *const envp[]) {
     return merged;
 }
 
+/* §25 (/proc/self/exe saat jalan via loader):
+ * Bila program dijalankan sebagai "ld-musl-patched.so.1 /path/prog args...",
+ * maka /proc/self/exe milik proses = LOADER, bukan prog. Bun/OpenCode memakai
+ * execPath (= /proc/self/exe) untuk men-spawn dirinya sendiri, sehingga
+ * terbit "ld-musl-patched.so.1: cannot load serve: No such file or directory"
+ * (loader menerima argv[1]="serve" sebagai nama program). Perbaikan:
+ * wariskan path program lewat env FAKEROOT_EXE, lalu readlink("/proc/self/exe")
+ * menjawab path itu — dan sediakan jaring pengaman bila loader tetap
+ * dipanggil tanpa nama program. */
+#define FK_EXE_KEY "FAKEROOT_EXE="
+
+static const char *fk_self_exe(void) {
+    const char *v = getenv("FAKEROOT_EXE");
+    return (v && *v) ? v : NULL;
+}
+
+/* argv utk loader: [loader, hostpath, argv[1..]] + env FAKEROOT_EXE=hostpath */
+static char **fk_loader_env(char *const envp[], const char *hostpath) {
+    int ne = 0; while (envp && envp[ne]) ne++;
+    char **out = malloc(((size_t)ne + 2) * sizeof(char *));
+    if (!out) return (char **)envp;
+    int m = 0;
+    for (int i = 0; i < ne; i++) {
+        if (strncmp(envp[i], FK_EXE_KEY, sizeof FK_EXE_KEY - 1) == 0) continue;
+        out[m++] = envp[i];
+    }
+    size_t need = sizeof FK_EXE_KEY + strlen(hostpath);
+    char *ent = malloc(need);
+    if (ent) { snprintf(ent, need, FK_EXE_KEY "%s", hostpath); out[m++] = ent; }
+    out[m] = NULL;
+    return out;
+}
+
+/* Jaring pengaman: ada yang meng-exec LOADER langsung dgn argv[1] yang bukan
+ * program (mis. "serve") karena ia membaca /proc/self/exe. Sisipkan kembali
+ * program sebenarnya di depan. Return argv baru atau NULL bila tak perlu. */
+static char **fk_fix_loader_argv(const char *hostpath, char *const argv[]) {
+    const char *self = fk_self_exe();
+    if (!self) return NULL;
+    if (strcmp(hostpath, fk_loader_path()) != 0) return NULL;
+    if (!argv || !argv[0]) return NULL;
+    if (argv[1] && argv[1][0] == '/') return NULL;   /* sudah benar */
+    int n = 0; while (argv[n]) n++;
+    char **nav = malloc(((size_t)n + 2) * sizeof(char *));
+    if (!nav) return NULL;
+    nav[0] = argv[0];
+    nav[1] = (char *)self;
+    for (int k = 1; k < n; k++) nav[k + 1] = argv[k];
+    nav[n + 1] = NULL;
+    return nav;
+}
+
 /* exec satu path (sudah di-rewrite ke host) — lewat loader patched bila perlu,
  * persis jalur cepat fake-run: loader host argv... (argv target dipertahankan). */
 static int fk_exec_one(const char *hostpath, char *const argv[], char *const envp[]) {
@@ -481,9 +533,19 @@ static int fk_exec_one(const char *hostpath, char *const argv[], char *const env
         for (int k = 1; k < n; k++) nav[m++] = argv[k];  /* skip argv[0] */
         nav[m] = NULL;
         NEXT(execve);
-        int r = CALL(execve, loader, nav, e2);
+        char **lenv = fk_loader_env(e2, hostpath);
+        int r = CALL(execve, loader, nav, lenv);
         free(nav);
         return r;
+    }
+    {   /* exec langsung ke loader dgn argv[1] bukan program (Bun execPath) */
+        char **fx = fk_fix_loader_argv(hostpath, argv);
+        if (fx) {
+            NEXT(execve);
+            int r = CALL(execve, hostpath, fx, e2);
+            free(fx);
+            return r;
+        }
     }
     int r = fk_try_shebang_exec(hostpath, argv, e2);
     if (r != -2) return r;                   /* script shebang: hasil sudah final */
@@ -583,9 +645,18 @@ static int fk_spawn_common(pid_t *res, const char *hostpath,
         nav[1] = (char *)hostpath;
         for (int k = 1; k < n; k++) nav[k + 1] = argv[k];
         nav[n + 1] = NULL;
-        int r = CALL(posix_spawn, res, loader, fa, attr, nav, menv);
+        char **lenv = fk_loader_env(menv, hostpath);
+        int r = CALL(posix_spawn, res, loader, fa, attr, nav, lenv);
         int e = errno; free(nav); errno = e;
         return r;
+    }
+    {   /* spawn langsung ke loader dgn argv[1] bukan program (Bun execPath) */
+        char **fx = fk_fix_loader_argv(hostpath, argv);
+        if (fx) {
+            int r = CALL(posix_spawn, res, hostpath, fa, attr, fx, menv);
+            int e = errno; free(fx); errno = e;
+            return r;
+        }
     }
     int r = CALL(posix_spawn, res, hostpath, fa, attr, argv, menv);
     if (r == ENOENT) {
@@ -870,13 +941,42 @@ int symlinkat(const char *a, int d, const char *b2) {
     }
     return CALL(symlinkat, a, d, b2);
 }
+/* true bila p menunjuk exe milik proses ini (/proc/self/exe atau /proc/<pid>/exe) */
+static int fk_is_self_exe(const char *p) {
+    if (!p) return 0;
+    if (strcmp(p, "/proc/self/exe") == 0) return 1;
+    char mine[64];
+    snprintf(mine, sizeof mine, "/proc/%d/exe", (int)getpid());
+    return strcmp(p, mine) == 0;
+}
+
 ssize_t readlink(const char *p, char *buf, size_t n) {
     NEXT(readlink);
+    /* §25: jalan via loader -> /proc/self/exe = loader. Jawab program asli
+     * supaya execPath Bun/OpenCode benar saat men-spawn dirinya sendiri. */
+    if (fk_is_self_exe(p)) {
+        const char *self = fk_self_exe();
+        if (self) {
+            size_t l = strlen(self);
+            if (l > n) l = n;
+            memcpy(buf, self, l);
+            return (ssize_t)l;
+        }
+    }
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(readlink, b, buf, n); }
     return CALL(readlink, p, buf, n);
 }
 ssize_t readlinkat(int d, const char *p, char *buf, size_t n) {
     NEXT(readlinkat);
+    if (fk_is_self_exe(p) && (d == AT_FDCWD || p[0] == '/')) {
+        const char *self = fk_self_exe();
+        if (self) {
+            size_t l = strlen(self);
+            if (l > n) l = n;
+            memcpy(buf, self, l);
+            return (ssize_t)l;
+        }
+    }
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(readlinkat, d, b, buf, n); }
     return CALL(readlinkat, d, p, buf, n);
 }
