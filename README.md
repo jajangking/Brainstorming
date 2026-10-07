@@ -25,7 +25,8 @@ secara **native** di Termux/Android tanpa root, tanpa proot — termasuk **isola
 - `block-trap.c` — bukti TRAP-while-SIGSYS-blocked = kill instan
 - `raw-rt-sig.c` — resep handler SIGSYS dengan layout `sigaction` kernel (bionic)
 - `fake-run` — **runner universal** wadah palsu: binary dinamis → jalur cepat loader musl + `LD_PRELOAD`; binary **statis (tanpa PT_INTERP) otomatis** jatuh ke supervisor `svsp` (USER_NOTIF); `--svsp` memaksa supervisor.
-- `svsp.c` — supervisor `SECCOMP_RET_USER_NOTIF` (TAHAP 3): child pasang filter sendiri (`NO_NEW_PRIVS` + `NEW_LISTENER`), listener dikirim ke parent bebas-filter via SCM_RIGHTS; openat/stat/statx/statfs/readlink/execve/chdir/mkdir/unlink/rename/link/symlink/chmod/chown/truncate/utimensat/access/dll. di-rewrite `base+path` → eksekusi parent + `ADDFD`/`process_vm_writev`/memori-rewrite+`CONTINUE`. Menutup binary statis & syscall raw tanpa LD_PRELOAD.
+- `svsp.c` — supervisor `SECCOMP_RET_USER_NOTIF` (TAHAP 3): child pasang filter sendiri (`NO_NEW_PRIVS` + `NEW_LISTENER`), listener dikirim ke parent bebas-filter via SCM_RIGHTS; openat/stat/statx/statfs/readlink/execve/chdir/mkdir/unlink/rename/link/symlink/chmod/chown/truncate/utimensat/access/dll. di-rewrite `base+path` → eksekusi parent + `ADDFD`/`process_vm_writev`/memori-rewrite+`CONTINUE`. Menutup binary statis & syscall raw tanpa LD_PRELOAD. **Bug yang sudah diperbaiki:** arm64 tidak punya syscall `rmdir` (libc mengemulasi via `unlinkat`) — fallback lama `SYS_rmdir=21` menabrak `epoll_ctl=21` (tabel asm-generic) → runtime Go statis mati dengan "epollctl failed with 14"; rule kini di-guard `#ifdef SYS_rmdir`.
+- `examples/gobukti.go` — bukti dunia nyata: program **Go statis asli** (toolchain Go, `CGO_ENABLED=0`, tanpa PT_INTERP) yang berjalan lewat supervisor; sekaligus regresi-test bug epoll di atas.
 - `bootstrap.sh` — **pemasangan satu-perintah** (TAHAP 4): unduh/ekstrak minirootfs Alpine 3.24.2 (aarch64) → pasang musl-dev (header + libc.a/crt*.o, sekaligus jadi toolchain build STATIS) → patch loader (byte-patch diverifikasi hash, SIGSYS tak diblokir) → rewrite PT_INTERP semua binary wadah (`pinterp` in-place; `patchelf` bila perlu-perluasan) → passthrough `/dev /proc /sys` + relink applet busybox relatif → build `libfakeroot.so` + `svsp` → pasang `fake-run`/`svsp` ke `$PREFIX/bin` → verifikasi 4 jalur (dinamis, supervisor, statis, isolasi ENOENT). Idempoten.
 - `pinterp.c` — tool kecil tanpa dependensi: tulis ulang PT_INTERP **in-place** (path baru muat di segmen lama). Bila tak muat keluar kode 3 → `bootstrap.sh` menyerahkan ke `patchelf --set-interpreter` (terbukti untuk perluasan).
 
@@ -52,6 +53,29 @@ Yang dibangun dari nol: rootfs segar terverifikasi (`SHA256` loader stock dicoco
 ./fake-run /usr/bin/st2                # statik no-loader: baca /etc/alpine-release -> 3.24.2
 ./fake-run /usr/bin/bossv              # statik -> fork -> exec /bin/sh dinamis -> cat
 ```
+
+## Bukti dunia nyata: program Go statis asli (jalur supervisor)
+
+Go menutup seluruh rantai: binarynya **statis murni** (tanpa PT_INTERP → `fake-run` otomatis memilih supervisor `svsp`), dan runtime-nya memakai syscall nyata (`epoll_ctl` netpoll, `openat`, `stat`, `getdents64`, …) yang di-rewrite di kernel.
+
+```sh
+cd examples
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o gobukti gobukti.go
+fake-run ./gobukti
+```
+
+Hasil (dicapai 2026-10-07, Alpine 3.24.2 aarch64, Go 1.27.1):
+
+```
+[gobukti] Go statis asli — pid=7906 cwd=.../alpine-rootfs
+  baca /etc/alpine-release   -> "3.24.2" (err=<nil>)
+  >>> ISOLASI TERBUKTI: /system/build.prop tidak terlihat (ENOENT)
+  chain tulis->baca->hapus      -> write=<nil> read="go-chain-OK" readerr=<nil> rm=<nil>
+  walk /etc (36 entri)         -> OK
+  readlink /proc/self/exe       -> .../alpine-rootfs/usr/bin/gobukti
+```
+
+Jalur dinamis (flagship, 241 MB bun/musl) juga tetap hijau: `fake-run .../package/claude --version` → `2.1.291 (Claude Code)`.
 
 ## Kesimpulan
 

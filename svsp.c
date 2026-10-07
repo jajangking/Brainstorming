@@ -54,9 +54,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#ifndef SYS_rmdir
-#define SYS_rmdir 21
-#endif
+/* CATATAN KRITIS: TIDAK ada syscall rmdir(2) di arm64 (tabel asm-generic);
+ * bionic/musl mengemulasi rmdir lewat unlinkat. JANGAN pernah fallback
+ * SYS_rmdir ke nomor lain — di arm64 nomor 21 = epoll_ctl. Fallback lama
+ * (SYS_rmdir=21) membuat filter men-*match* epoll_ctl sebagai "rmdir",
+ * membaca fd sebagai pointer path, gagal, dan membalas EFAULT — meruntuhkan
+ * runtime Go statis (netpoll: "epollctl failed with 14").
+ */
 #ifndef SYS_readlink
 #define SYS_readlink 89
 #endif
@@ -134,7 +138,9 @@ static struct rule rules[] = {
     { C_SIDE,      SYS_mkdir       },
 #endif
     { C_SIDE,      SYS_mkdirat     },
+#ifdef SYS_rmdir
     { C_SIDE,      SYS_rmdir       },
+#endif
 #ifdef SYS_unlink
     { C_SIDE,      SYS_unlink      },
 #endif
@@ -399,7 +405,9 @@ static void handle(int listener, const struct seccomp_notif *req) {
 #ifdef SYS_mkdir
         case SYS_mkdir:    rc = mkdir(pout, (mode_t)a[1]); break;
 #endif
+#ifdef SYS_rmdir
         case SYS_rmdir:    rc = rmdir(pout); break;
+#endif
 #ifdef SYS_unlink
         case SYS_unlink:   rc = unlink(pout); break;
 #endif

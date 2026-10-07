@@ -31,6 +31,8 @@ Ringkasan satu kalimat: **seccomp Android ternyata tidak membunuh tanpa syarat �
 | **Boss test: statik → fork → exec `/bin/sh` dinamis → `cat`** | `bossv`: `SH-OK` + `3.24.2` ✓ — satu proses pohon campur statis/dinamis |
 | Isolasi terbalik | `cat /system/build.prop` → **ENOENT** (bukan EACCES host) ✓; `/dev/null`, `/sys` tetap passthrough ✓ |
 | Kematian target tidak membangunkan `RECV` yang terblokir (bug kernel Android) | loop `poll(listener, 200ms)` + `waitpid(WNOHANG)` → supervisor keluar bersih (rc=0), tanpa hang |
+| **Go statis asli** (toolchain Go 1.27, `CGO_ENABLED=0`, tanpa PT_INTERP) di bawah USER_NOTIF — runtime netpoll (epoll/eventfd), `openat`/`stat`/`getdents64`, tanpa LD_PRELOAD | `examples/gobukti.go`: `/etc/alpine-release`→`3.24.2`, `/system/build.prop`→**ENOENT**, rantai file `/tmp`, walk `/etc` (36) ✓, `readlink /proc/self/exe`→path base ✓, rc=0 |
+| Bug yang ditemukan: arm64 **tidak punya syscall `rmdir`** (tabel asm-generic; libc mengemulasi via `unlinkat`) — fallback `SYS_rmdir=21` menabrak **`epoll_ctl=21`** (nomor 21 di arm64 BUKAN rmdir!) → `epoll_ctl` Go di-*notify* sebagai "rmdir" → path = fd (bukan pointer) → `process_vm_readv` gagal → balas **-EFAULT** → "runtime: epollctl failed with 14", runtime mati | Diperbaiki: hapus fallback, rule+case di-guard `#ifdef SYS_rmdir`. Bukti: `eptest` (epoll C statis) `epoll_ctl=0`; `gobukti` lolos penuh; V1–V4 + claude tetap hijau |
 | Batas jujur | execve path yang memerlukan rewrite tapi berada di memori **read-only** (.rodata) tidak bisa diubah → **ENOENT** (aman, tidak bocor ke host); shell/program normal membangun path di stack/heap (writable) → tetap jalan |
 | Batas yang tetap (tetap butuh shim/loader patched) | `set*id` dll.: `RET_TRAP` firmware (0x30000) menang atas `USER_NOTIF` (0x7fc00000) via AND-min → SIGSYS-shim `libfakeroot.so` tetap hidup berdampingan |
 
@@ -57,7 +59,7 @@ Yang masih BELUM 100% tertutup oleh solusi LD_PRELOAD + loader patched:
 
 1. **Syscall mentah** — bun/node/zig (dan Go) memanggil sebagian syscall **langsung**, tanpa lewat simbol libc → rewrite path terlewat. (Terbukti: `mkdirat` claude kena rewrite, tapi `openat` raw tidak.)
    - Mitigasi sekarang: env `HOME/TMPDIR/PWD` diarahkan ke *path host-absolut yang memang sudah berada di dalam rootfs* → jalur ini masuk wadah **bahkan lewat syscall raw** (karena path-nya memang ada di sana). Inilah trik yang membuat Claude benar-benar jalan.
-2. **Binary statis (Go/C statis)** — tidak punya loader dinamis → LD_PRELOAD tak bisa disuntik. Program melihat host.
+2. **Binary statis (Go/C statis)** — tidak punya loader dinamis → LD_PRELOAD tak bisa disuntik. **TERTUTUP oleh supervisor `svsp`** (TAHAP 3): rewrite path terjadi di kernel, berlaku untuk statis & syscall raw. **Terbukti dengan program Go statis asli** (`examples/gobukti.go`, Go 1.27, `CGO_ENABLED=0`, tanpa PT_INTERP) yang berjalan penuh lewat `fake-run` (auto → supervisor): rewrite `/etc/alpine-release` → `3.24.2`, isolasi `/system/build.prop` → ENOENT, rc=0.
 3. **Identitas uid** — `getuid()` tetap 10386, bukan 0 (wajar: kita memang bukan root).
 
 ### Jalan keluar yang sudah TERBUKTI untuk celah 1 & 2: supervisor seccomp USER_NOTIF (`svsp`)
