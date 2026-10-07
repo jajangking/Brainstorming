@@ -1,0 +1,134 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# selftest — verifikasi SATU PERINTAH wadah alpine (shim + svsp + apk-doctor).
+#
+#   ./selftest                    # uji lengkap (butuh jaringan utk apk add)
+#   ./selftest --diagnose         # read-only: artefak + DB + resolv.conf saja
+#   SELFTEST_PKG=acl ./selftest   # ganti paket uji (default: acl)
+#
+# Output: baris [PASS]/[FAIL] + ringkasan; exit code = jumlah FAIL.
+# Simpan hasil utk feedback:
+#   ./selftest | tee device-feedback/selftest-$(date +%F).txt
+#
+# Strategi (HANDOFF §21): jalur utama apk = SHIM (`fake-run apk`, TANPA
+# --svsp) — terbukti hijau penuh di device. Bagian svsp di sini memverifikasi
+# jalur alternatif; kegagalannya TIDAK menghalangi pemakaian harian wadah.
+
+set -u
+
+PKG="${SELFTEST_PKG:-acl}"
+BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+MODE=full
+[ "${1:-}" = "--diagnose" ] && MODE=diag
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+FR="$(command -v fake-run || echo "$SELF_DIR/fake-run")"
+DOC="$(command -v apk-doctor || echo "$SELF_DIR/apk-doctor")"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+FAILS=0
+pass() { printf '[PASS] %s\n' "$1"; }
+fail() { printf '[FAIL] %s — %s\n' "$1" "$2"; FAILS=$((FAILS + 1)); }
+info() { printf '[info] %s\n' "$1"; }
+chk()  { if [ "$2" -eq 0 ]; then pass "$1"; else fail "$1" "$3"; fi; }
+
+echo "== selftest $(date '+%F %T') mode=$MODE base=$BASE =="
+
+# --- 1. artefak -------------------------------------------------------------
+chk "ada: $FR" "$([ -e "$FR" ]; echo $?)" "file tak ditemukan"
+chk "ada: $DOC" "$([ -e "$DOC" ]; echo $?)" "file tak ditemukan"
+chk "base ada: $BASE" "$([ -d "$BASE" ]; echo $?)" "jalankan bootstrap.sh dulu"
+chk "shim libfakeroot.so" "$([ -e "${FAKE_SHIM:-$HOME/libfakeroot.so}" ] || [ -e "$SELF_DIR/libfakeroot.so" ]; echo $?)" "jalankan install.sh dulu"
+chk "svsp" "$([ -x "${FAKE_SVSP:-$PREFIX/bin/svsp}" ] || [ -x "$SELF_DIR/svsp" ] || [ -x "$HOME/svsp" ]; echo $?)" "jalankan install.sh dulu"
+chk "loader patched" "$([ -e "$BASE/lib/ld-musl-patched.so.1" ]; echo $?)" "jalankan install.sh dulu"
+
+# --- 2. resolv.conf ---------------------------------------------------------
+if [ -f "$BASE/etc/resolv.conf" ]; then
+    NS=$(grep -c '^nameserver' "$BASE/etc/resolv.conf")
+    chk "resolv.conf >=2 NS (dapat $NS)" "$([ "$NS" -ge 2 ]; echo $?)" "setup_dns bermasalah"
+    if grep -q '^options' "$BASE/etc/resolv.conf"; then
+        pass "resolv.conf ada baris options"
+    else
+        fail "resolv.conf options" "baris options hilang"
+    fi
+else
+    fail "resolv.conf" "$BASE/etc/resolv.conf tak ada"
+fi
+
+# --- 3. apk-doctor ----------------------------------------------------------
+if bash "$DOC" --base="$BASE" >/tmp/.doctor-pre.$$ 2>&1; then
+    pass "apk-doctor: DB bersih (tanpa flag f/s)"
+else
+    fail "apk-doctor: ada flag f/s basi" "$(grep -m3 '  ' /tmp/.doctor-pre.$$ 2>/dev/null | tr '\n' ';')"
+fi
+
+if [ "$MODE" = diag ]; then
+    echo "== diagnose selesai: $FAILS FAIL =="
+    exit "$FAILS"
+fi
+
+# --- 4. baseline: bersihkan flag basi agar test tak saling mencemari --------
+bash "$DOC" --base="$BASE" --clear-broken >/dev/null 2>&1
+info "baseline: flag f/s dibersihkan dulu (backup .bak-doctor.* disimpan apk-doctor)"
+
+# --- 5. jalur SHIM (JALUR UTAMA — §21) --------------------------------------
+OUT=$(bash "$FR" apk --version 2>&1); RC=$?
+if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -q 'apk-tools'; then
+    pass "shim: apk --version"
+else
+    fail "shim: apk --version" "rc=$RC out=$(printf '%s' "$OUT" | head -1)"
+fi
+
+info "shim: apk add --no-cache $PKG ..."
+OUT=$(bash "$FR" apk add --no-cache "$PKG" 2>&1); RC=$?
+chk "shim: apk add $PKG rc=0" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC out=$(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
+if printf '%s' "$OUT" | grep -qi 'error'; then
+    fail "shim: apk add tanpa baris error" "$(printf '%s' "$OUT" | grep -i error | head -2 | tr '\n' ' ')"
+else
+    pass "shim: apk add tanpa baris error"
+fi
+
+OUT=$(bash "$FR" apk add busybox 2>&1); RC=$?   # paket dengan trigger
+chk "shim: apk add busybox (trigger) rc=0" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC out=$(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
+
+# --- 6. jalur SVSP (alternatif) ----------------------------------------------
+info "svsp: apk add --no-cache $PKG ..."
+OUT=$(bash "$FR" --svsp apk add --no-cache "$PKG" 2>&1); RC=$?
+chk "svsp: apk add $PKG rc=0" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC out=$(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"
+if printf '%s' "$OUT" | grep -qi 'failed to write database'; then
+    fail "svsp: tanpa 'failed to write database'" "DB write gagal (bug §17.2 kambuh)"
+else
+    pass "svsp: tanpa 'failed to write database'"
+fi
+if printf '%s' "$OUT" | grep -qi 'not an absolute path'; then
+    fail "svsp: tanpa 'not an absolute path'" "busybox --install gagal (bug ronde-2 kambuh)"
+else
+    pass "svsp: tanpa 'not an absolute path'"
+fi
+if printf '%s' "$OUT" | grep -qi 'error'; then
+    fail "svsp: tanpa baris error lain" "$(printf '%s' "$OUT" | grep -i error | head -2 | tr '\n' ' ')"
+else
+    pass "svsp: tanpa baris error lain"
+fi
+LEFT="$(ls -A "$BASE/lib/apk/exec" 2>/dev/null)"
+chk "svsp: lib/apk/exec kosong" "$([ -z "$LEFT" ]; echo $?)" "sisa: $(printf '%s' "$LEFT" | tr '\n' ' ')"
+
+# --- 7. uji kecil lain -------------------------------------------------------
+OUT=$(bash "$FR" /bin/busybox sh -c 'echo SBARGS-ok' 2>&1)
+chk "fake-run SBARGS (busybox sh -c)" "$(printf '%s' "$OUT" | grep -q 'SBARGS-ok'; echo $?)" "out=$(printf '%s' "$OUT" | head -1)"
+
+bash "$FR" /bin/busybox test -e /data/data/com.termux/files/home >/dev/null 2>&1; RC=$?
+chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.2)"
+
+# --- 8. pembersihan ----------------------------------------------------------
+info "cleanup: purge $PKG ..."
+bash "$FR" apk del --no-scripts "$PKG" >/dev/null 2>&1
+if bash "$DOC" --base="$BASE" >/dev/null 2>&1; then
+    pass "akhir: DB tetap bersih"
+else
+    info "akhir: ada flag f/s baru tertulis selama test — dibersihkan:"
+    bash "$DOC" --base="$BASE" --clear-broken >/dev/null 2>&1
+fi
+rm -f /tmp/.doctor-pre.$$
+
+echo "== RINGKASAN: $FAILS FAIL =="
+exit "$FAILS"

@@ -142,3 +142,21 @@ Jalankan **checklist HANDOFF §20.4** apa adanya; kriteria lulus utama:
 `fake-run --svsp apk add --no-cache acl` → **rc=0 tanpa baris error apa pun**.
 Isi `device-feedback/ronde3.md` (template di repo), commit + push. Aturan
 main sama: jujur, "N/A" bila tak bisa, jangan menebak.
+
+---
+
+# UPDATE: gunakan `./selftest` (menggantikan checklist manual)
+
+Sejak HANDOFF §21, verifikasi device cukup SATU perintah:
+
+```bash
+cd ~/Brainstorming && git pull && ./install.sh
+./selftest | tee device-feedback/selftest-$(date +%F).txt
+```
+
+- Exit code = jumlah FAIL; kirim/commit file hasilnya apa adanya.
+- Baca dulu komentar strategi di `selftest` & HANDOFF §21: jalur utama apk
+  = shim (`fake-run apk` tanpa --svsp); kegagalan svsp tidak memblokir
+  pemakaian harian — laporkan saja.
+- Bila `./selftest` sendiri bermasalan (crash/salah deteksi), laporkan itu
+  sebagai temuan; fallback = checklist manual ronde terkait.

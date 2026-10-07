@@ -1243,3 +1243,35 @@ ls $BASE/lib/apk/exec/                                        # kosong
 fake-run /bin/busybox test -e /data/data/com.termux/files/home && echo PASSTHROUGH-OK
 # isi device-feedback/ronde3.md (template di repo), commit + push.
 ```
+
+## 21. Strategi pragmatis: shim = jalur utama apk (keputusan)
+
+Sesudah 3 ronde device, pembagiannya tegas:
+
+| Jalur | Status device | Pakai untuk |
+|---|---|---|
+| `fake-run apk ...` (shim LD_PRELOAD) | **HIJAU PENUH** — add/del/trigger/`fix --reinstall` rc=0 (ronde 1-2) | **semua pemakaian apk sehari-hari** |
+| `fake-run --svsp ...` | DB write beres; shebang wrapper ada; verifikasi trigger menunggu | biner STATIS (musl statis tak bisa LD_PRELOAD) & eksperimen |
+
+Konsekuensi:
+- Kriteria "selesai" utk kebutuhan praktis = jalur shim hijau (sudah tercapai
+  di device). Paritas svsp diperlakukan sebagai penyempurnaan, bukan blocker.
+- Verifikasi device dipangkas jadi SATU perintah: **`./selftest`**
+  (baris `[PASS]/[FAIL]`, exit code = jumlah gagal, cleanup otomatis).
+  Mode `--diagnose` = read-only (artefak + DB + resolv.conf). Hasil utk
+  feedback: `./selftest | tee device-feedback/selftest-$(date +%F).txt`.
+- **Plan C** (bila trigger svsp tetap gagal di device): hybrid —
+  `fake-run --svsp apk` otomatis `--no-scripts` (tulis DB via svsp, terbukti
+  beres) lalu trigger dijalankan ulang via jalur shim. Belum diimplementasi;
+  hanya bila diperlukan.
+
+### 21.1 Keputusan: TETAP Alpine, jangan pindah distro
+
+Analisis (pertanyaan user 2026-10-07): dari ~6 kelas bug yang ditemui, 4-5
+bersumber dari batasan Android tanpa root (interpreter ELF, shebang script
+paket, chown tanpa root, seccomp) dan akan muncul lagi di distro APA PUN.
+Pindah ke Debian/glibc malah menambah beban: loader glibc jauh lebih sulit
+di-patch daripada musl, plus permukaan baru (dpkg lock, maintainer scripts).
+Yang pindah distro hanya menghapus bug khusus apk (O_TMPFILE publish, silent
+flag) — keduanya sudah diatasi (`SVSP_MASK_TMPFILE` + `apk-doctor`). Untuk
+kebutuhan tool harian murni, `pkg` bawaan Termux tetap paling realistis.
