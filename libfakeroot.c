@@ -474,7 +474,34 @@ static char **fk_ensure_wadah_env(char *const envp[]) {
 
 static const char *fk_self_exe(void) {
     const char *v = getenv("FAKEROOT_EXE");
-    return (v && *v) ? v : NULL;
+    if (v && *v) return v;
+    /* §26: proses yang dijalankan sbg "loader prog args" tanpa FAKEROOT_EXE
+     * (mis. fake-run versi lama, atau exec dari luar). /proc/self/exe =
+     * loader, tetapi /proc/self/cmdline[1] = program sebenarnya. */
+    static char cached[PATH_MAX];
+    static int tried;
+    if (tried) return cached[0] ? cached : NULL;
+    tried = 1;
+    char ex[PATH_MAX];
+    NEXT(readlink);
+    ssize_t r = CALL(readlink, "/proc/self/exe", ex, sizeof ex - 1);
+    if (r <= 0) return NULL;
+    ex[r] = 0;
+    if (strcmp(ex, fk_loader_path()) != 0) return NULL;   /* bukan via loader */
+    NEXT(open);
+    int fd = CALL(open, "/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return NULL;
+    char cl[4096];
+    ssize_t n = read(fd, cl, sizeof cl - 1);
+    close(fd);
+    if (n <= 0) return NULL;
+    cl[n] = 0;
+    size_t a0 = strlen(cl) + 1;                 /* lewati argv[0] (= loader) */
+    if ((ssize_t)a0 >= n) return NULL;
+    const char *prog = cl + a0;
+    if (prog[0] != '/') return NULL;
+    snprintf(cached, sizeof cached, "%s", prog);
+    return cached;
 }
 
 /* argv utk loader: [loader, hostpath, argv[1..]] + env FAKEROOT_EXE=hostpath */

@@ -877,11 +877,29 @@ static void handle(int listener, const struct seccomp_notif *req) {
 #endif
             fd = openat(atfd, pout, (int)oflags, (int)a[3]);
 
-        /* Batas yang DIAKUI (uji sandbox): dua sudut tak tertolong oleh
-         * degradasi ini — simlink dgn O_PATH|O_NOFOLLOW (jadi ELOOP) dan
-         * file tanpa izin baca utk supervisor (jadi EACCES). Reopen lewat
-         * /proc/self/fd sudah dicoba dan TIDAK membantu (objeknya sendiri
-         * tak bisa dibuka O_RDONLY). Belum ada jalan lain via ADDFD. */
+#ifdef O_PATH
+        /* Sudut-1 §25.1 (dikonfirmasi device ronde 6): file tanpa izin baca.
+         * O_PATH asli TIDAK memeriksa izin baca, degradasi O_RDONLY memeriksa
+         * -> EACCES padahal natif OK. Di konteks fake-root kita pemilik berkas,
+         * jadi: pinjam bit baca sebentar, buka, lalu KEMBALIKAN mode semula. */
+        if (fd < 0 && path_req && errno == EACCES) {
+            int sav = errno;
+            struct stat ms;
+            if (fstatat(atfd, pout, &ms, AT_SYMLINK_NOFOLLOW) == 0 &&
+                !S_ISLNK(ms.st_mode) && ms.st_uid == geteuid() &&
+                fchmodat(atfd, pout, (ms.st_mode | S_IRUSR) & 07777, 0) == 0) {
+                fd = openat(atfd, pout, (int)oflags, (int)a[3]);
+                int e2 = errno;
+                fchmodat(atfd, pout, ms.st_mode & 07777, 0);   /* pulihkan */
+                errno = (fd < 0) ? e2 : 0;
+            }
+            if (fd < 0) errno = sav;
+        }
+#endif
+        /* Sudut-2 §25.1 BELUM terpecahkan: simlink dgn O_PATH|O_NOFOLLOW tetap
+         * ELOOP — fd O_PATH ke simlink mustahil dikirim lewat ADDFD (kernel
+         * fget() menolak FMODE_PATH) dan tak ada fd non-O_PATH yang mewakili
+         * simlink itu sendiri. Batas arsitektural, didokumentasikan apa adanya. */
 
         if (atfd_ref >= 0) { close(atfd_ref); atfd_ref = -1; }
 
@@ -900,6 +918,7 @@ static void handle(int listener, const struct seccomp_notif *req) {
         add.flags = SECCOMP_ADDFD_FLAG_SEND;
         add.srcfd = fd;
         add.newfd = 0;          /* kernel pilih fd terendah di child */
+        errno = 0;      /* jangan laporkan errno basi pada baris sukses */
         int nfd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
         DBG("ADDFD nr=%ld -> fd=%d errno=%d%s\n", nr, nfd, errno,
             path_req ? " (O_PATH didegradasi ke O_RDONLY)" : "");

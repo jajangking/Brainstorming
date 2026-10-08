@@ -192,6 +192,7 @@ fi
 exec env -i \
   LD_PRELOAD="$SHIM" \
   FAKE_BASE="$HOME_BASE" \
+  FAKEROOT_EXE="$host" \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
   HOME="$HOME_BASE/root" \

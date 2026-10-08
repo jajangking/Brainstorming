@@ -234,3 +234,33 @@ Yang berubah (HANDOFF §25, sudah diuji di sandbox x86):
    izin baca — dua sudut itu MASIH belum terpecahkan (lihat §25.1).
 
 Aturan sama: jujur, N/A bila tak bisa, commit ke `device-feedback/ronde6.md`.
+
+---
+
+# RONDE 7 — verifikasi shim (3 tambalan) + sudut O_PATH mode-000
+
+Ronde 6 sangat bagus: svsp **4/4 ✅** dan Anda menangkap konfound daemon natif
+sendiri. Diagnosis Anda soal shim (`FAKEROOT_EXE` kosong + bun baca execPath lewat
+syscall mentah) **benar** dan jadi dasar perbaikan ini (HANDOFF §26).
+
+Yang berubah:
+- `fake-run` kini men-set `FAKEROOT_EXE="$host"` (dulu tak pernah ada → itu sebabnya
+  env anak kosong).
+- `fk_self_exe()` punya cadangan: bila env kosong dan `/proc/self/exe` = loader,
+  ambil `/proc/self/cmdline[1]`.
+- Jaring pengaman spawn: `loader ["serve",...]` disisipi program sebenarnya.
+- svsp: `O_PATH` pada file **mode 000** kini OK (pinjam bit baca, mode dipulihkan).
+- DBG ADDFD tak lagi cetak errno basi.
+
+**Tugas:**
+1. `git pull && ./install.sh`.
+2. Matriks 4 kasus × 3 jalur, format tabel ronde 6, **dgn protokol keadaan bersih
+   Anda** (daemon mati + port 000 sebelum tiap run) — itu sangat membantu.
+3. Jalur shim kasus 3 & 4: bila masih ❌, lampirkan teks error persis +
+   `--print-logs` baris `spawning process` (kami ingin tahu `command=` sekarang apa)
+   + hasil `env | grep FAKEROOT_EXE` dari dalam `fake-run /bin/sh -c 'env|grep FAKEROOT'`.
+4. Ulangi `repro-sudut2.c`: **file mode 000 harus OK sekarang** di svsp; **simlink
+   O_NOFOLLOW tetap ELOOP** (itu batas arsitektural, bukan regresi — cukup konfirmasi).
+5. Bila bootstrap 0555 terpicu lagi, laporkan (perbaikan belum dikerjakan).
+
+Jujur seperti biasa; N/A bila tak bisa; commit ke `device-feedback/ronde7.md`.

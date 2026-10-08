@@ -1520,3 +1520,65 @@ program → error persis di atas. Keluarga bug §20.1 (`/proc/self/*`), varian s
   device benar, PT_INTERP ada.
 - **"Hang" spawn = konflik port 49374** dengan service opencode HOST, bukan bug
   wadah. Natif + port bebas = spawn sukses penuh.
+
+## 26. RONDE 6 — svsp TUNTAS; shim diperbaiki di 3 lapis
+
+`device-feedback/ronde6.md` (basis `ca64cb4`): **10/12 ✅**. Fix O_PATH §25.1
+**TERVERIFIKASI di perangkat**: matriks svsp 4/4 ✅ (kasus 3 & 4 yang dulu HTTP 500
+kini TUI render + anak benar-benar spawn, port 49474 000→200), repro O_PATH
+`open(O_PATH)('/')` EACCES → **OK fd=3**. Device juga menangkap konfound sendiri
+(pass-1 shim/svsp menyambung ke daemon natif) dan mengulang dgn keadaan bersih —
+kualitas data ronde ini tinggi.
+
+**Kesimpulan praktis: OpenCode jalan penuh di dalam wadah lewat jalur svsp.**
+
+### 26.1 Mengapa fix shim §25.2 belum menggigit (diagnosis device benar)
+
+Device: `FAKEROOT_EXE` **kosong di env anak**, dan log bun menunjukkan
+`command=<loader> args=["serve","--stdio","--port","0"]`. Sebabnya ada tiga dan
+semuanya saya tambal sekarang:
+
+1. **`fake-run` tak pernah men-set `FAKEROOT_EXE`.** Jalur ldpreload meng-exec
+   `env -i ... "$LOADER" "$host" ...`, jadi proses induk sendiri tak punya env itu
+   (§25.2 hanya mewariskannya untuk anak yang dirangkai libfakeroot). **FIX:**
+   `FAKEROOT_EXE="$host"` ditambahkan ke env `fake-run`.
+2. **Bun membaca `/proc/self/exe` lewat syscall mentah** (Zig `selfExePath`), bukan
+   libc → interposer `readlink` memang tak pernah kena. Dugaan device **tepat**.
+   Maka perbaikan tak boleh bergantung pada interposisi baca; andalannya adalah
+   jaring pengaman di sisi spawn.
+3. **`fk_self_exe()` tak punya sumber cadangan.** **FIX:** bila `FAKEROOT_EXE`
+   kosong, baca `/proc/self/exe`; bila hasilnya = loader, ambil
+   `/proc/self/cmdline[1]` (= program sebenarnya saat dijalankan `loader prog ...`).
+
+Dgn (1)+(3), `fk_fix_loader_argv()` punya bahan untuk menyisipkan ulang program
+saat Bun men-spawn `loader ["serve",...]`.
+
+**Verifikasi sandbox (harness meniru device):** program yang membaca execPath via
+**syscall mentah** lalu `posix_spawn` ke loader:
+- tanpa shim → `ld-musl-patched.so.1: cannot load serve: No such file or directory`
+  (error device tereproduksi persis);
+- dgn shim → `LOADER OK -> program=/tmp/B/app/opencode argumen: serve --stdio`.
+Fallback `cmdline[1]`: tanpa `FAKEROOT_EXE`, `readlink(/proc/self/exe)` dari dalam
+shim mengembalikan program, bukan loader.
+
+Catatan: ini **belum** verifikasi perangkat. Bun bisa saja memakai jalur spawn lain
+(`fork`+`execve` mentah dari Zig) yang tak lewat PLT — bila ronde 7 masih gagal,
+jawabannya adalah "pakai jalur svsp" (sudah 4/4 ✅), bukan menambah tambalan shim.
+
+### 26.2 Sudut §25.1 — satu PECAH, satu batas arsitektural
+
+- **File tanpa izin baca (mode 000): PECAH.** O_PATH asli tak memeriksa izin baca,
+  degradasi O_RDONLY memeriksa. Karena di konteks fake-root supervisor adalah
+  pemilik berkas: pinjam bit `S_IRUSR` sebentar → buka → **kembalikan mode semula**
+  (hanya bila bukan simlink & `st_uid == geteuid()`). Uji sandbox: svsp
+  `O_PATH mode 000` EACCES → **OK**, dan `stat` sesudahnya tetap `0`.
+- **Simlink + `O_PATH|O_NOFOLLOW`: TETAP ELOOP — batas arsitektural.** Kernel
+  `fget()` menolak fd `FMODE_PATH` di ADDFD, dan tak ada fd non-O_PATH yang mewakili
+  simlink itu sendiri. Tidak ada tambalan jujur; didokumentasikan apa adanya.
+
+### 26.3 Lain-lain
+
+- DBG `ADDFD` tak lagi mencetak errno basi pada baris sukses (`errno=0` sebelum ioctl)
+  — persis catatan kosmetik device.
+- **bootstrap.sh 0555 masih belum diperbaiki** (ronde 5 §1). Tidak terpicu di ronde 6
+  hanya karena `chmod u+w` ronde 5 persisten. Tetap di antrean.
