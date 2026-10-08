@@ -202,8 +202,15 @@ fix_applet_links() {
 rewrite_interp() {
     log "build pinterp (rewrite PT_INTERP in-place)"
     clang -O2 -o "$TMPW/pinterp" "$SRCPINT" || die "build pinterp gagal"
-    local n=0 fail=0 f rc
+    local n=0 fail=0 f rc magic
     while IFS= read -r f; do
+        # §38: PRA-SARING tanpa spawn. Device ronde 16: `find` menyapu SELURUH
+        # $BASE termasuk klon git pengguna (root/.hermes = 16.168 berkas) dan
+        # memanggil pinterp satu per satu -> install >7 menit (tampak hang).
+        # Objek git/pack/teks tak pernah ELF, jadi baca 4 byte magic lewat
+        # builtin `read` (tanpa proses baru) dan lewati yang bukan ELF.
+        magic=""; LC_ALL=C read -rn4 magic < "$f" 2>/dev/null || true
+        [ "$magic" = $'\x7fELF' ] || continue
         rc=0; "$TMPW/pinterp" "$f" "$BASE/lib/ld-musl-patched.so.1" || rc=$?
         # §27: berkas paket kerap ber-mode read-only (0555, mis. isi .codex) —
         # pinterp lalu gagal EACCES dan dulu MEMBATALKAN seluruh bootstrap
@@ -226,7 +233,10 @@ rewrite_interp() {
             2) fail=$((fail+1)); warn "I/O gagal: $f" ;;
             4) warn "dilewati (sedang dieksekusi): $f" ;;   # ETXTBSY — bukan kegagalan
         esac
-    done < <(find "$BASE" -type f -size +64c)
+    done < <(find "$BASE" \
+        \( -type d \( -name .git -o -name node_modules -o -name __pycache__ \
+                     -o -name .venv -o -name .cache \) -prune \) -o \
+        \( -type f -size +64c -size -64M -print \))
     log "PT_INTERP di-set: $n file${fail:+, $fail gagal}"
     [ "$fail" -eq 0 ] || die "ada file ELF yang gagal di-rewrite"
 }

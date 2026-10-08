@@ -547,3 +547,37 @@ musl; override user tetap menang) di jalur shim & svsp.
 4. Bila loader patched memang tak mencetak banner, laporkan saja — perbaikannya
    (menyusun ulang situs patch) akan saya pertimbangkan terpisah; jangan ubah
    loader sendiri.
+
+---
+
+# RONDE 17 — diagnostik Anda membalik kesimpulan saya (dan mempercepat install)
+
+Diagnostik loader yang Anda jalankan sangat berharga: **dugaan saya salah.**
+Byte-patch 7 situs tidak bersalah. Yang mengganti keluaran adalah **shim kami**:
+`fk_fix_loader_argv()` (jaring pengaman Bun, §30) menyisipkan `/proc/self/exe`
+(= busybox) saat loader di-exec **tanpa argumen** — itulah kenapa yang muncul
+usage BusyBox, rc=0, dan banner `Version 1.2.6` tak pernah tercetak.
+
+Dua perbaikan terkirim (HANDOFF §38):
+1. `fk_fix_loader_argv()` tidak menyisipkan apa pun bila `argv[1]` kosong atau
+   berupa opsi (`-...`). Perilaku Bun tidak berubah.
+2. `install.sh`/`rewrite_interp`: `find` mem-prune `.git`/`node_modules`/
+   `__pycache__`/`.venv`/`.cache` + lewati >64 MB, lalu pra-saring magic `\x7fELF`
+   lewat builtin `read` (tanpa spawn). Benchmark: 12.001 → 1 kandidat.
+
+**Tugas:**
+1. `git pull && ./install.sh` — **dengan `.hermes` tetap di tempatnya**.
+   Catat waktunya (`time ./install.sh`). Harapan: selesai cepat, tak perlu
+   menyingkirkan `.hermes` lagi, dan jumlah "PT_INTERP di-set" tetap wajar
+   (~30 file, bandingkan dgn ronde 16).
+2. `./selftest` → 0 FAIL? + `alpine` → `opencode` TUI (regresi inti).
+3. Ulangi diagnostik loader Anda sendiri:
+   ```
+   alpine -c '/lib/ld-musl-patched.so.1 2>&1 | head -4'
+   ```
+   Harapan: kini mencetak `musl libc (aarch64)` + `Version 1.2.6` (bukan BusyBox).
+4. Uji deteksi otomatis uv **tanpa** bantuan env:
+   `alpine -c 'env -u UV_LIBC uv python install 3.14 -v 2>&1 | tail -20'`
+   → apakah lolos deteksi libc tanpa `UV_LIBC`? (Kalau ya, §38.1 benar-benar
+   menyembuhkan akarnya; `UV_LIBC=musl` tetap kami biarkan sebagai sabuk pengaman.)
+5. Bila DNS sudah sehat, lanjutkan Hermes sampai selesai — murni opsional.

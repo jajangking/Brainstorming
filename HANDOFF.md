@@ -2082,3 +2082,64 @@ Catatan jujur: ini **mengatasi gejala dengan fakta yang benar**, bukan
 memperbaiki loader. Kalau ternyata loader patched memang tak lagi mencetak
 banner, itu bug tersendiri yang bisa memengaruhi alat lain yang memprobe libc
 dengan cara sama — karena itu brief ronde 16 meminta diagnostik langsungnya.
+
+## 38. RONDE 16 — dugaan loader SALAH; akarnya shim kami + install.sh O(semua berkas)
+
+`device-feedback/ronde16.md` (basis `9bd93da`): **§37 terverifikasi** —
+`UV_LIBC=musl` sampai ke wadah, `uv 0.12.3 (aarch64-unknown-linux-musl)` jalan,
+pesan "Failed to determine the libc" **hilang**. Hermes kini maju sampai unduh
+Python dan berhenti karena **DNS** (`dns error` / `Try again`) — lingkungan,
+bukan wadah. `selftest` 0 FAIL.
+
+### 38.1 Dugaan §37.1 ternyata SALAH — bukan byte-patch loader
+
+Diagnostik device (yang saya minta) memberi jawaban yang tak saya duga:
+
+```
+=stock no-arg=   /lib/ld-musl-aarch64.so.1   rc=1
+musl libc (aarch64) / Version 1.2.6 / Dynamic Program Loader / Usage: ...
+=patched no-arg= /lib/ld-musl-patched.so.1   rc=0
+BusyBox v1.37.0 ... multi-call binary.       <-- ?!
+```
+
+Loader patched mencetak **usage BusyBox**. Device juga memverifikasi string
+`musl libc` **masih ada** di dalam biner patched (ukuran identik dgn stock).
+Jadi byte-patch 7 situs **tidak bersalah** — yang mengganti keluaran adalah
+**shim kami sendiri**:
+
+`fk_fix_loader_argv()` (jaring pengaman §30 untuk Bun) menyisipkan
+`/proc/self/exe` sebagai `argv[1]` bila loader di-exec tanpa argumen absolut.
+Saat `uv` menjalankan `ld-musl-patched.so.1` **tanpa argumen sama sekali**,
+kami menyisipkan shell busybox → loader menjalankan busybox → usage BusyBox,
+rc=0, dan banner versi tak pernah tercetak.
+
+**FIX:** `fk_fix_loader_argv()` kini berhenti (tak menyisipkan apa pun) bila
+`argv[1] == NULL` (permintaan banner yang sah) atau bila `argv[1]` diawali `-`
+(opsi loader seperti `--list`). Perilaku Bun (`argv[1]` = nama non-absolut
+seperti `serve`) tidak berubah.
+
+Pelajaran: §37 "obat gejala" ternyata menutupi bug kami sendiri. `UV_LIBC=musl`
+tetap dipertahankan (benar secara fakta & menghemat satu spawn), tetapi deteksi
+otomatis uv sekarang semestinya **juga** jalan.
+
+### 38.2 `install.sh` tampak hang bila ada data pengguna di `$BASE`
+
+Device: dengan klon `root/.hermes` (16.168 berkas) di dalam `$BASE`,
+`rewrite_interp()` memanggil `pinterp` **satu proses per berkas** untuk seluruh
+isi `$BASE` → install >7 menit (dua kali timeout 600s). Ini O(semua berkas),
+bukan hang mutlak — tapi tak praktis dan akan makin buruk seiring pemakaian.
+
+**FIX dua lapis:**
+1. `find` kini mem-`prune` direktori `.git`, `node_modules`, `__pycache__`,
+   `.venv`, `.cache`, dan melewati berkas > 64 MB.
+2. Pra-saring **tanpa spawn**: baca 4 byte magic lewat builtin `read`; hanya
+   berkas ber-magic `\x7fELF` yang diserahkan ke `pinterp`.
+
+Benchmark sandbox (12.000 objek git + 1 ELF): kandidat spawn **12.001 → 1**.
+Uji fungsional: ELF diproses, berkas teks dilewati, `.git` tak disentuh.
+
+### 38.3 Sisa yang BUKAN urusan kita
+
+Kegagalan unduh Python = `dns error`/`EAI_AGAIN` saat menarik dari
+`objects.githubusercontent.com`. Device menilai transien; `git fetch` di wadah
+berhasil. Tidak ada tindakan kode.

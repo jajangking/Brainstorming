@@ -586,7 +586,14 @@ static char **fk_fix_loader_argv(const char *hostpath, char *const argv[]) {
     if (!self) return NULL;
     if (strcmp(hostpath, fk_loader_path()) != 0) return NULL;
     if (!argv || !argv[0]) return NULL;
-    if (argv[1] && argv[1][0] == '/') return NULL;   /* sudah benar */
+    /* §38: loader TANPA argumen = permintaan sah untuk mencetak banner
+     * "musl libc (aarch64) / Version 1.2.6" + usage. Dulu kita menyisipkan
+     * /proc/self/exe (= busybox shell) sehingga yang tercetak justru usage
+     * BusyBox, rc=0. Itu yang membuat deteksi libc `uv` gagal (ia menjalankan
+     * loader dari PT_INTERP lalu mencari "Version x.y"). Jangan diutak-atik. */
+    if (!argv[1]) return NULL;
+    if (argv[1][0] == '/') return NULL;              /* sudah benar */
+    if (argv[1][0] == '-') return NULL;              /* opsi loader (--list dll) */
     int n = 0; while (argv[n]) n++;
     char **nav = malloc(((size_t)n + 2) * sizeof(char *));
     if (!nav) return NULL;
