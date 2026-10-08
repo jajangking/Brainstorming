@@ -1625,3 +1625,44 @@ read-only (mis. 52 berkas `.codex` 0555 di ronde 5 yang dulu mematikan seluruh
 bootstrap), kini **pinjam bit tulis sebentar → ulangi → pulihkan mode semula**,
 dan hanya dianggap gagal bila tetap tak bisa. Device tak perlu lagi `chmod u+w`
 manual.
+
+## 28. RONDE 8 — getcwd silang-namespace (kandidat terakhir shim kasus 3)
+
+`device-feedback/ronde8.md` (basis `56bfa20`): **11/12, stagnan**. Dua hasil:
+
+1. **Utang bootstrap 0555 LUNAS & terverifikasi**: device sengaja men-`chmod a-w`
+   dua ELF `.codex` → `install.sh` RC=0, `PT_INTERP 24 file, 0 gagal`, dan mode
+   dikembalikan persis (555→555, 444→444). Ronde 5 (hard-abort) tak terulang.
+2. **Kasus 3 shim masih `LocationNotFoundError: /root`** — error identik. Device
+   membuktikan mekanisme §27 sendiri benar (`realpath $HOME`→host, `realpath
+   /root`→`/root`, `realpath .`→host) sehingga `/root` **datang dari jalur lain**,
+   dan menemukan kandidatnya:
+
+```
+fake-run /bin/sh -c 'cd /root && pwd -P && readlink /proc/self/cwd'
+/root                          <- pwd -P (getcwd, di-interposisi) = NAMESPACE WADAH
+/data/.../alpine-rootfs/root   <- kernel cwd                      = HOST
+```
+
+Jadi satu proses yang sama melihat dua namespace. §27 sengaja tidak menyentuh
+`getcwd` — keputusan itu ternyata **salah** untuk pemakai syscall mentah: Bun
+mengambil lokasi proyek dari getcwd (libc, ter-interposisi → `/root`) lalu
+men-stat-nya lewat syscall mentah (tak ter-interposisi → kernel host tak kenal)
+→ ENOENT → `LocationNotFoundError`.
+
+**FIX §28:** `getcwd()` kini menjawab **kebenaran host**, konsisten dgn realpath
+§27 (prinsip: shim tak boleh menyilangkan namespace di dalam satu proses, karena
+kita tak bisa menjamin semua pembaca lewat libc). Escape hatch
+**`FAKE_VIEW=container`** memulihkan tampilan lama bila ada yang bergantung padanya.
+
+Uji sandbox: default → `getcwd=realpath(.)=kernel cwd=$B/root`;
+`FAKE_VIEW=container` → `getcwd=/root` (perilaku lama) sementara kernel tetap host.
+
+**Risiko yang saya akui:** ini mengubah tampilan cwd untuk SEMUA pemakai jalur
+shim (apk, busybox, prompt shell). Karena itu brief ronde 9 meminta **`./selftest`
+penuh (17 tes)**, bukan hanya matriks opencode. Bila ada regresi apk, jalan
+mundurnya satu env: `FAKE_VIEW=container` di `fake-run`.
+
+Catatan: bila kasus 3 shim TETAP gagal sesudah ini, saya berhenti menambal shim
+untuk Bun — jalur **svsp sudah 4/4 sejak ronde 6** dan itu jawaban yang sah
+untuk tugas "OpenCode jalan di dalam wadah".

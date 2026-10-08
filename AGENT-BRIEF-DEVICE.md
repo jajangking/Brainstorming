@@ -292,3 +292,31 @@ Yang berubah:
 
 Catatan: bila kasus 3 shim tetap gagal, itu bukan penghalang pemakaian —
 **jalur svsp sudah 4/4 sejak ronde 6**; shim adalah bonus kompatibilitas.
+
+---
+
+# RONDE 9 — getcwd konsisten host (kandidat Anda) + SELFTEST PENUH
+
+Ronde 8 Anda menemukan kuncinya: `pwd -P` = `/root` tapi kernel cwd = host —
+satu proses, dua namespace. Hipotesis Anda saya terima dan tambal (HANDOFF §28):
+`getcwd()` kini menjawab kebenaran host, konsisten dgn `realpath` §27.
+Escape hatch bila ada masalah: `FAKE_VIEW=container`.
+
+Terima kasih juga untuk uji bootstrap 0555 yang rapi (mode 555/444 dipulihkan) —
+utang ronde 5 resmi lunas.
+
+**Tugas (urutan ini penting):**
+1. `git pull && ./install.sh`.
+2. **`./selftest | tee device-feedback/selftest-ronde9.txt`** — WAJIB duluan.
+   Perubahan getcwd menyentuh semua pemakai shim (apk, busybox), jadi regresi
+   apk lebih penting daripada opencode. Laporkan RINGKASAN & setiap FAIL.
+3. Matriks 4×3 protokol keadaan bersih; fokus kasus 3 shim.
+4. Diagnostik singkat: `fake-run /bin/sh -c 'cd /root && pwd -P && pwd && readlink /proc/self/cwd'`
+   → sekarang ketiganya harus sama (host).
+5. Bila ada FAIL di selftest akibat getcwd: ulangi tes itu dgn
+   `FAKE_VIEW=container fake-run ...` dan laporkan bedanya — itu menentukan
+   apakah kami pasang escape hatch sebagai default.
+
+Catatan arah: bila kasus 3 shim tetap ❌ setelah ini, kami **berhenti menambal
+shim untuk Bun**. Jalur svsp sudah 4/4 sejak ronde 6 = tugas "OpenCode jalan di
+dalam wadah" sudah tercapai; shim hanya bonus.

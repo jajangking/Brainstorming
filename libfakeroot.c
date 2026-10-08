@@ -1071,10 +1071,27 @@ int statfs(const char *p, struct statfs *s) {
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(statfs, b, s); }
     return CALL(statfs, p, s);
 }
+/* §28: tampilan cwd.
+ * Dulu getcwd SELALU melepas prefix base ("/root"), padahal cwd kernel =
+ * "$BASE/root". Proses yang memakai hasil getcwd lewat SYSCALL MENTAH
+ * (Zig/Bun tak lewat libc, jadi tak ter-interposisi) lalu gagal:
+ * "LocationNotFoundError: Location not found: /root" (device ronde 7-8;
+ * dibuktikan device via `pwd -P`=/root vs readlink /proc/self/cwd=host).
+ * Default kini KONSISTEN dgn realpath §27: jawab kebenaran host.
+ * Escape hatch: FAKE_VIEW=container memulihkan tampilan wadah lama. */
+static int fk_view_container(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *s = getenv("FAKE_VIEW");
+        v = (s && strcmp(s, "container") == 0) ? 1 : 0;
+    }
+    return v;
+}
+
 char *getcwd(char *buf, size_t n) {
     NEXT(getcwd);
     char *r = CALL(getcwd, buf, n);
-    if (r) {
+    if (r && fk_view_container()) {
         size_t bl = strlen(fk_base);
         if (strncmp(r, fk_base, bl) == 0 && (r[bl] == '/' || r[bl] == '\0'))
             memmove(r, r + bl, strlen(r + bl) + 1);    /* /data/.../base -> "" ->"/" */
