@@ -208,7 +208,9 @@ runtime_libs() {
 # ------------------------------------------------------- paket dasar wadah
 # Peralatan standar yang diharapkan ada di setiap wadah: curl (unduh),
 # bash (shell skrip umum — bawaan wadah hanya busybox ash), git (klon repo
-# & tooling). Dipasang via apk wadah, idempoten.
+# & tooling). `ncurses-base`/`ncurses-term` menyediakan database terminfo —
+# tanpa itu `tput` absen dan aplikasi TUI menebak-nebak escape sequence,
+# sehingga warna/ketikan bisa kacau. Dipasang via apk wadah, idempoten.
 # Syarat: dipanggil SETELAH install() (butuh fake-run + shim), sama
 # seperti runtime_libs.
 base_packages() {
@@ -216,13 +218,17 @@ base_packages() {
     for p in curl bash git; do
         [ -x "$BASE/usr/bin/$p" ] || [ -x "$BASE/bin/$p" ] || missing=1
     done
+    [ -d "$BASE/usr/share/terminfo" ] || missing=1
     if [ "$missing" -eq 0 ]; then
-        log "paket dasar (curl bash git) sudah ada — dipakai ulang"; return 0
+        log "paket dasar (curl bash git + terminfo) sudah ada — dipakai ulang"; return 0
     fi
     [ -x "$PREFIX/bin/fake-run" ] || die "fake-run belum terpasang (base_packages dipanggil sebelum install?)"
-    log "pasang paket dasar (curl bash git) via apk wadah..."
+    log "pasang paket dasar (curl bash git + terminfo) via apk wadah..."
+    # nama paket terminfo di Alpine 3.24: ncurses-terminfo-base (umum) +
+    # ncurses-terminfo (256-color dkk). 'ncurses-base'/'ncurses-term' tak ada.
     env -u LD_PRELOAD "$PREFIX/bin/fake-run" --base="$BASE" apk add curl bash git \
-        || die "apk add curl bash git gagal"
+        ncurses-terminfo-base ncurses-terminfo \
+        || die "apk add paket dasar gagal"
 }
 
 # ------------------------------------------------- symlink applet busybox

@@ -30,6 +30,28 @@ SVSP="${FAKE_SVSP:-}"
 MODE=auto
 
 # opsi --loader/--shim/--base/--svsp dan ENV=val di depan
+usage() {
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+
+Opsi:
+  --base=DIR          wadah (default: $HOME/alpine-rootfs)
+  --svsp              paksa supervisor seccomp (default: otomatis per jenis binary)
+  --ldpreload         paksa jalur cepat LD_PRELOAD
+  --loader=FILE       loader musl patched (default: <base>/lib/ld-musl-patched.so.1)
+  --shim=FILE         shim path-rewrite (default: $HOME/libfakeroot.so)
+  ENV=val ...         setel env di dalam wadah (mis. HTTP_PROXY=...)
+  -h, --help          tampilkan bantuan ini
+  -V, --version       versi
+
+Contoh:
+  fake-run cat /etc/alpine-release
+  fake-run --svsp bash -lc 'hermes'
+  FAKE_BASE=/path/rootfs fake-run apk add curl
+EOF
+    exit "${1:-0}"
+}
+
 extra_env=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -38,12 +60,14 @@ while [ $# -gt 0 ]; do
         --base=*)   HOME_BASE="${1#--base=}"; shift ;;
         --svsp)     MODE=svsp; shift ;;
         --ldpreload) MODE=ldpreload; shift ;;
+        -h|--help)  usage 0 ;;
+        -V|--version) echo "fake-run (Brainstorming) — Alpine fake-chroot runner"; exit 0 ;;
         *=*)        extra_env+=("$1"); shift ;;
         *)          break ;;
     esac
 done
 
-[ $# -ge 1 ] || { echo "pemakaian: fake-run [--svsp] [--loader=FILE] [ENV=val ...] <program> [args...]"; exit 2; }
+[ $# -ge 1 ] || { usage 2; }
 prog="$1"; shift
 
 # resolve program
@@ -201,6 +225,8 @@ if [ "$MODE" = svsp ]; then
       PWD="$(pwd)" \
       USER=root LOGNAME=root SHELL=/bin/sh \
       TERM="${TERM:-xterm-256color}" \
+      LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}" \
+      COLORTERM="${COLORTERM:-truecolor}" \
       ${extra_env[@]+"${extra_env[@]}"} \
       ${dbg_env[@]+"${dbg_env[@]}"} \
       "$SVSP" --base="$HOME_BASE" "${tgt[@]}" "$@"
@@ -228,6 +254,8 @@ exec env -i \
   PWD="$(pwd)" \
   USER=root LOGNAME=root SHELL=/bin/sh \
   TERM="${TERM:-xterm-256color}" \
+  LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}" \
+  COLORTERM="${COLORTERM:-truecolor}" \
   ${extra_env[@]+"${extra_env[@]}"} \
   ${dbg_env[@]+"${dbg_env[@]}"} \
   "$LOADER" "${tgt[@]}" "$@"

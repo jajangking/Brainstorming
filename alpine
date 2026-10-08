@@ -45,9 +45,73 @@ if [ $# -eq 0 ]; then
     # Shell interaktif. Mendarat di /root wadah (= $HOME) supaya prompt
     # pendek: \w => "~" (bukan path penuh /data/data/.../alpine-rootfs).
     [ -d "$BASE/root" ] || mkdir -p "$BASE/root"
-    echo "Masuk Alpine 3.24.2 (fake-chroot, native speed)"
-    echo "Ketik 'exit' untuk keluar"
-    echo
+
+    # Banner + prompt memakai PALET HIJAU SOFT (hex lewat OSC 8-bit) —
+    # hijau adalah warna yang paling LITAR di mata untuk teks antarmuka
+    # dan selalu terbaca di atas latar gelap maupun terang.
+    #   soft   #7FB77E  body / garis
+    #   mid    #5E9C6B  label
+    #   bright #A8D5AA  aksen (nama "alpine", exit)
+    #   deep   #3D6B4A  shadow / tanda panah
+    # Non-TTY (log/CI) -> warna dimatikan, pesan polos.
+    # Bersihkan layar dulu: tanpa ini teks Termux sebelumnya masih nyisa di
+    # atas banner (terlihat kotor). 2J=hapus layar, 3J=hapus scrollback,
+    # H=kursor ke pojok kiri. Opt-out: ALPINE_NO_CLEAR=1.
+    if [ -t 1 ] && [ -z "${ALPINE_NO_CLEAR:-}" ]; then
+        printf '\033[2J\033[3J\033[H'
+    fi
+
+    if [ -t 1 ]; then
+        # Palet akin Termux: hijau terang sebagai warna utama, orange sebagai
+        # aksen. Sengaja tanpa magenta/ungu (nyaman di mata & aman di tema gelap).
+        #   GREEN_SOLID  #00AA00  garis kotak
+        #   GREEN_BRIGHT #00FF00  warna utama (green Termux)
+        #   ORANGE       #FF8700  aksen: "alpine" dan "exit"
+        # Padding ditulis sebagai SPASI LITERAL (5 dan 15 kolom) hasil hitung
+        # lebar tampilan target 54 kolom. Sengaja literal, bukan %*s: ${#t}
+        # bash bergantung locale dan "❯" bisa terhitung 3 byte saat LC_ALL=C,
+        # yang membuat tepi kotak miring di sebagian terminal.
+        G_GREEN=$'\033[38;2;0;170;0m'
+        G_BRIGHT=$'\033[1;38;2;0;255;0m'
+        G_ORANGE=$'\033[38;2;255;135;0m'
+        G_OFF=$'\033[0m'
+        printf '%s╭%s╮%s\n' "$G_GREEN" '                                                      ' "$G_OFF"
+        printf '%s│%s  %sAlpine 3.24.2%s  %s·  fake-chroot, tanpa root/proot%s     %s│%s\n' \
+            "$G_GREEN" "$G_OFF" "$G_BRIGHT" "$G_OFF" "$G_GREEN" "$G_OFF" "$G_GREEN" "$G_OFF"
+        printf '%s│%s  %s❯%s  prompt: %salpine%s   ·   %sexit%s → Termux%s               %s│%s\n' \
+            "$G_GREEN" "$G_OFF" "$G_BRIGHT" "$G_OFF" "$G_ORANGE" "$G_OFF" \
+            "$G_ORANGE" "$G_OFF" "$G_GREEN" "$G_GREEN" "$G_OFF"
+        printf '%s╰%s╯%s\n\n' "$G_GREEN" '                                                      ' "$G_OFF"
+    else
+        # Non-TTY (log/CI/piping): tanpa warna, pesan polos satu baris.
+        echo "Alpine 3.24.2 (fake-chroot, tanpa root/proot). Ketik 'exit' untuk keluar."
+        echo
+    fi
+
+    # rc file untuk sesi ini. Blok FAKE_ALPINE_RC ditulis UTUH lewat file
+    # sementara + blok lama dibuang (bukan `sed -i`): teks PS1 penuh escape
+    # `\033`/backtick yang mudah salah bila diproses regex/sed — device
+    # 2026-10-08: sed merusak .profile jadi error spam dari shell.
+    _rc="$BASE/root/.profile"
+    _blk="$BASE/tmp/.alpine-rc.$$"
+    {
+        echo '# >>> FAKE_ALPINE_RC >>>'
+        printf '%s\n' 'PS1="\[\033[38;2;0;170;0m\]\[\033[1;38;2;0;255;0m\]alpine\[\033[0m\]\[\033[38;2;0;170;0m\]:\[\033[38;2;255;135;0m\]\w\[\033[0m\]\[\033[1;38;2;0;255;0m\]❯\[\033[0m\] "'
+        echo 'alias la="apk list --installed"'
+        echo 'export PAGER=less'
+        echo '# <<< FAKE_ALPINE_RC <<<'
+    } > "$_blk" 2>/dev/null || true
+
+    if [ -s "$_blk" ]; then
+        # buang blok lama (bila ada) lalu sisipkan blok baru di akhir
+        _keep="$BASE/tmp/.profile.keep.$$"
+        awk '/^# >>> FAKE_ALPINE_RC >>>$/ {skip=1} /^# <<< FAKE_ALPINE_RC <<<$/ {skip=0; next} !skip' \
+            "$_rc" > "$_keep" 2>/dev/null || : > "$_keep"
+        cat "$_keep" "$_blk" > "$_rc" 2>/dev/null || true
+        rm -f "$_keep"
+    fi
+    rm -f "$_blk"
+
     exec env -u LD_PRELOAD FAKE_START="$BASE/root" "$FR" --base="$BASE" /bin/sh -l
 elif [ "$1" = "-c" ]; then
     # alpine -c "command" — jalankan command string di dalam wadah
