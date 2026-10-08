@@ -1711,3 +1711,63 @@ Dua tugas besar selesai: **§17 bug wadah (ronde 4, selftest 0 FAIL)** dan
 **OpenCode di dalam wadah (ronde 9, 12/12 + selftest 0 FAIL)**. Ketiga jalur
 (natif, svsp, shim) kini menjalankan OpenCode penuh termasuk spawn anak dan
 `--standalone`.
+
+## 30. RONDE 11 — `FAKEROOT_EXE` basi pada pemakaian nested (bug laten §26)
+
+Ronde 10 menutup brief dengan semua hijau (hatch `FAKE_VIEW` hidup, selftest
+0 FAIL, standalone svsp+shim render). **Ronde 11 datang tanpa brief**: device
+mereproduksi error dari sesi pemakaian NYATA (user masuk shell wadah lalu
+mengetik `opencode`):
+
+```
+Starting background server...
+Error: Server process exited with code 2
+$B/bin/sh: can't open 'serve': No such file or directory
+```
+
+### 30.1 Akar masalah (device membuktikan dgn kontrol A/B)
+
+`fake-run` men-set `FAKEROOT_EXE=$B/bin/sh` untuk **shell**-nya (benar untuk
+proses itu). Shell lalu menjalankan `opencode`, yang **mewarisi env itu apa
+adanya**. `fk_self_exe()` versi §26 mempercayai env lebih dulu → opencode
+mengira dirinya `/bin/sh` → `process.execPath` salah → spawn
+`command=sh args=["serve",...]` → `sh` mencari skrip bernama `serve` → exit 2.
+Jaring pengaman §26 diam karena `command` bukan loader.
+
+Kontrol A/B device: `FAKEROOT_EXE=` (dikosongkan) → TUI render ✅;
+`FAKEROOT_EXE=$B/bin/sh` (bawaan) → gagal ❌. Satu variabel, kausal.
+
+**Kenapa matriks 12/12 tak menangkapnya:** semua tes brief menjalankan
+`fake-run $OC` **langsung** (env = opencode, kebetulan benar). Pola alami
+"masuk shell → ketik opencode" tak pernah ada di brief mana pun. Ini **bug
+laten sejak §26**, bukan regresi ronde 10 — dan murni kelemahan desain tes saya.
+
+### 30.2 FIX §30 — kebenaran per-proses dulu, env cadangan terakhir
+
+Kandidat #2 device saya ambil (paling bersih). Urutan `fk_self_exe()` sekarang:
+
+1. `readlink /proc/self/exe`; bila **bukan** loader → itulah program ini (env
+   diabaikan — inilah yang mematikan nilai basi);
+2. bila exe == loader → `/proc/self/cmdline[1]` (pola "loader prog args");
+3. barulah env `FAKEROOT_EXE` (hanya bila exe tak terbaca).
+
+Hasilnya juga **ditulis balik** ke env (`setenv`), jadi keturunan mewarisi nilai
+segar, bukan basi.
+
+Uji sandbox (4 skenario, semua benar):
+
+| Skenario | Hasil |
+|---|---|
+| env basi `bin/sh` + exec langsung (bug device) | self-exe = **opencode** ✅ (dulu `bin/sh`) |
+| exe == loader, tanpa env | cmdline[1] = opencode ✅ (fallback §26 utuh) |
+| exe == loader + env basi | opencode ✅ — kebenaran proses menang |
+| exec langsung tanpa env | opencode ✅ |
+
+Dan `FAKEROOT_EXE` yang diteruskan ke anak ikut terkoreksi di semua skenario.
+
+### 30.3 Pelajaran untuk penulisan brief
+
+Matriks "12/12" hanya menguji jalur peluncuran langsung. Brief ronde 12 karena
+itu menambahkan **jalur pemakaian manusia**: masuk `alpine` interaktif →
+ketik `opencode`, plus nested dua tingkat. Workaround device (`FAKEROOT_EXE=
+opencode`) tak diperlukan lagi bila fix ini benar.

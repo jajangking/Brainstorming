@@ -473,35 +473,50 @@ static char **fk_ensure_wadah_env(char *const envp[]) {
 #define FK_EXE_KEY "FAKEROOT_EXE="
 
 static const char *fk_self_exe(void) {
-    const char *v = getenv("FAKEROOT_EXE");
-    if (v && *v) return v;
-    /* §26: proses yang dijalankan sbg "loader prog args" tanpa FAKEROOT_EXE
-     * (mis. fake-run versi lama, atau exec dari luar). /proc/self/exe =
-     * loader, tetapi /proc/self/cmdline[1] = program sebenarnya. */
+    /* §30 (device ronde 11): JANGAN percayai env lebih dulu. FAKEROOT_EXE
+     * diwarisi apa adanya oleh proses anak, jadi "masuk shell fake-run lalu
+     * ketik opencode" membuat opencode mengira dirinya /bin/sh ->
+     * spawn "sh serve ..." -> "can't open 'serve'" (exit 2).
+     * Urutan benar: kebenaran per-proses dulu, env hanya cadangan terakhir.
+     *   1. /proc/self/exe bila BUKAN loader  -> itulah program ini
+     *   2. exe == loader -> /proc/self/cmdline[1] (dijalankan "loader prog")
+     *   3. barulah env FAKEROOT_EXE (mis. exe tak terbaca)
+     * Nilai hasilnya juga ditulis balik ke env supaya keturunan mewarisi
+     * nilai yang SEGAR, bukan basi. */
     static char cached[PATH_MAX];
     static int tried;
     if (tried) return cached[0] ? cached : NULL;
     tried = 1;
+
     char ex[PATH_MAX];
     NEXT(readlink);
     ssize_t r = CALL(readlink, "/proc/self/exe", ex, sizeof ex - 1);
-    if (r <= 0) return NULL;
-    ex[r] = 0;
-    if (strcmp(ex, fk_loader_path()) != 0) return NULL;   /* bukan via loader */
-    NEXT(open);
-    int fd = CALL(open, "/proc/self/cmdline", O_RDONLY);
-    if (fd < 0) return NULL;
-    char cl[4096];
-    ssize_t n = read(fd, cl, sizeof cl - 1);
-    close(fd);
-    if (n <= 0) return NULL;
-    cl[n] = 0;
-    size_t a0 = strlen(cl) + 1;                 /* lewati argv[0] (= loader) */
-    if ((ssize_t)a0 >= n) return NULL;
-    const char *prog = cl + a0;
-    if (prog[0] != '/') return NULL;
-    snprintf(cached, sizeof cached, "%s", prog);
-    return cached;
+    if (r > 0) {
+        ex[r] = 0;
+        if (strcmp(ex, fk_loader_path()) != 0) {
+            snprintf(cached, sizeof cached, "%s", ex);   /* (1) exec langsung */
+        } else {
+            NEXT(open);                                  /* (2) via loader */
+            int fd = CALL(open, "/proc/self/cmdline", O_RDONLY);
+            if (fd >= 0) {
+                char cl[4096];
+                ssize_t n = read(fd, cl, sizeof cl - 1);
+                close(fd);
+                if (n > 0) {
+                    cl[n] = 0;
+                    size_t a0 = strlen(cl) + 1;          /* lewati argv[0] */
+                    if ((ssize_t)a0 < n && cl[a0] == '/')
+                        snprintf(cached, sizeof cached, "%s", cl + a0);
+                }
+            }
+        }
+    }
+    if (!cached[0]) {                                    /* (3) cadangan env */
+        const char *v = getenv("FAKEROOT_EXE");
+        if (v && *v) snprintf(cached, sizeof cached, "%s", v);
+    }
+    if (cached[0]) setenv("FAKEROOT_EXE", cached, 1);    /* segarkan utk anak */
+    return cached[0] ? cached : NULL;
 }
 
 /* argv utk loader: [loader, hostpath, argv[1..]] + env FAKEROOT_EXE=hostpath */

@@ -345,3 +345,31 @@ whitelist `env -i` (sejajar `SVSP_DEBUG`/`FK_DEBUG`).
 
 Catatan: bila `FAKE_VIEW=container` ternyata memecahkan sesuatu, laporkan; hatch
 itu hanya jalan mundur, default host sudah terbukti aman (selftest 0 FAIL).
+
+---
+
+# RONDE 12 — verifikasi fix FAKEROOT_EXE basi (nested) 
+
+Temuan ronde 11 Anda **berharga**: itu bug nyata yang lolos dari matriks 12/12
+karena semua tes brief (termasuk buatan saya) meluncurkan `fake-run $OC`
+langsung, sementara pemakaian manusia adalah "masuk shell → ketik opencode".
+Kontrol A/B Anda langsung menunjuk penyebabnya.
+
+Fix (HANDOFF §30): `fk_self_exe()` kini memakai kebenaran per-proses dulu —
+`/proc/self/exe` bila bukan loader, lalu `cmdline[1]`, dan env `FAKEROOT_EXE`
+hanya cadangan terakhir; nilainya juga disegarkan untuk anak. Kandidat #2 Anda.
+
+**Tugas:**
+1. `git pull && ./install.sh`.
+2. **Reproduksi ronde 11 Anda, tanpa workaround:**
+   `env -u LD_PRELOAD fake-run /bin/sh -c '$HOME/.opencode/bin/opencode </dev/null'`
+   → harapkan TUI render (bukan `can't open 'serve'`).
+3. **Jalur pemakaian manusia** (yang selama ini tak pernah diuji):
+   `alpine` interaktif → ketik `opencode` → TUI render? Lalu `opencode --standalone`.
+4. Nested dua tingkat: shell → `sh -c` → opencode. Dan cek nilainya ikut benar:
+   di dalam shell wadah jalankan `sh -c 'echo $FAKEROOT_EXE'` lalu bandingkan
+   dgn `readlink /proc/self/exe` proses opencode bila sempat.
+5. Regresi: `./selftest` (0 FAIL?) + matriks singkat kasus 3 & 4 jalur svsp+shim.
+
+Bila ada yang masih gagal, lampirkan kontrol A/B seperti ronde 11 — format itu
+sangat membantu.
