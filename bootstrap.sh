@@ -320,33 +320,27 @@ build_binaries() {
 
 install() {
     mkdir -p "$PREFIX/bin"
-    cp "$TMPW/svsp" "$PREFIX/bin/svsp"
-    chmod 0755 "$PREFIX/bin/svsp"
-    cp "$SRCFAKE" "$PREFIX/bin/fake-run"
-    chmod 0755 "$PREFIX/bin/fake-run"
-    if [ -f "$SRC/alpine" ]; then
-        cp "$SRC/alpine" "$PREFIX/bin/alpine"
-        chmod 0755 "$PREFIX/bin/alpine"
-    fi
-    # `app` — daftar aplikasi yang terpasang (dijalankan dari shell wadah)
+    # Pasang secara ATOMIK: tulis ke file sementara lalu `mv` (rename).
+    # `cp` langsung ke target GAGAL "Text file busy" (ETXTBSY) bila binary
+    # sedang dieksekusi — mis. ada app wadah yang masih jalan saat update
+    # (device 2026-10-09: svsp dikunci proses, bootstrap gagal). rename()
+    # mengganti inode, jadi proses yang sedang jalan tak terganggu.
+    install_atomic() { # install_atomic <src> <dst> [mode]
+        local src=$1 dst=$2 mode=${3:-0755} tmp
+        mkdir -p "$(dirname "$dst")"
+        tmp="$dst.new.$$"
+        cp "$src" "$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$dst"
+    }
+    install_atomic "$TMPW/svsp" "$PREFIX/bin/svsp"
+    install_atomic "$SRCFAKE" "$PREFIX/bin/fake-run"
+    [ -f "$SRC/alpine" ] && install_atomic "$SRC/alpine" "$PREFIX/bin/alpine"
+    # `app` — daftar aplikasi terpasang (dipakai dari dalam shell wadah)
     if [ -f "$SRC/app" ]; then
-        cp "$SRC/app" "$PREFIX/bin/app"
-        chmod 0755 "$PREFIX/bin/app"
-        mkdir -p "$BASE/usr/local/bin"
-        cp "$SRC/app" "$BASE/usr/local/bin/app"
-        chmod 0755 "$BASE/usr/local/bin/app"
+        install_atomic "$SRC/app" "$PREFIX/bin/app"
+        install_atomic "$SRC/app" "$BASE/usr/local/bin/app"
     fi
-    # launcher aplikasi: grid TUI + registry (opsional, tak ganggu bila absen)
-    if [ -f "$SRC/apps" ] && [ -f "$SRC/apps.list" ]; then
-        cp "$SRC/apps" "$PREFIX/bin/apps"
-        chmod 0755 "$PREFIX/bin/apps"
-        mkdir -p "$PREFIX/share/brainstorming"
-        cp "$SRC/apps.list" "$PREFIX/share/brainstorming/apps.list"
-    fi
-    chmod 0755 "$HOME/libfakeroot.so"
     log "terpasang: $PREFIX/bin/fake-run, $PREFIX/bin/svsp, $PREFIX/bin/alpine, ~/libfakeroot.so"
     [ -f "$PREFIX/bin/app" ] && log "daftar aplikasi: app (juga di dalam wadah: /usr/local/bin/app)"
-    [ -f "$PREFIX/bin/apps" ] && log "launcher: $PREFIX/bin/apps (daftar: $PREFIX/share/brainstorming/apps.list)"
 }
 
 # ------------------------------------------------------------- verifikasi

@@ -113,6 +113,83 @@ if [ $# -eq 0 ]; then
     rm -f "$_blk"
 
     exec env -u LD_PRELOAD FAKE_START="$BASE/root" "$FR" --base="$BASE" /bin/sh -l
+elif [ "$1" = "update" ]; then
+    # ------------------------------------------------- alpine update
+    # Tarik pembaruan repo lalu pasang ulang binary turunan (shim/svsp/loader
+    # check) dengan bootstrap.sh yang idempoten. Isi wadah (apk, app, config)
+    # TIDAK tersentuh — yang di-rebuild hanya alatnya.
+    shift
+    # Cari checkout repo: skrip ini biasanya dijalankan dari $PREFIX/bin
+    # (salinan terpasang), jadi `dirname $0` BUKAN repo.
+    SRC=""
+    for cand in "${BASH_SOURCE[0]%/*}" "$HOME/Brainstorming" "$HOME/src/Brainstorming"; do
+        cand=$(cd "$cand" 2>/dev/null && pwd) || continue
+        if [ -d "$cand/.git" ] && [ -f "$cand/bootstrap.sh" ]; then SRC="$cand"; break; fi
+    done
+    [ -n "$SRC" ] || { echo "repo Brainstorming tak ditemukan (dicari: \$PREFIX/bin, \$HOME/Brainstorming)" >&2; exit 1; }
+    echo "▌ git pull (repo: $(basename "$SRC"))"
+    ( cd "$SRC" && git pull --ff-only ) || echo "  [!] git pull gagal — lanjut dengan versi lokal"
+    # Peringatan: proses wadah yang masih jalan menahan binary (ETXTBSY saat
+    # rewrite INTERP; install sekarang atomic, tapi file loader sendiri tak
+    # bisa ditimpa selagi dipetakan).
+    busy=$(ps -o args 2>/dev/null | grep -F "$BASE/" | grep -vF 'grep' | head -3)
+    if [ -n "$busy" ]; then
+        echo "  [!] ada proses wadah yang masih jalan (mungkin menahan loader):"
+        printf '%s\n' "$busy" | sed 's/^/      /'
+        echo "      → aman: install atomic (rename), tapi file loader yg sedang"
+        echo "        dipetakan akan dilewati. Tutup app/terminalnya lalu ulangi."
+    fi
+    echo "▌ pasang ulang alat (shim, svsp, loader, app)"
+    ( cd "$SRC" && ./bootstrap.sh ) || { echo "bootstrap gagal — lihat output di atas" >&2; exit 1; }
+    echo
+    echo "▌ salin ulang skrip ke $PREFIX/bin"
+    for f in alpine app; do
+        [ -f "$SRC/$f" ] && cp "$SRC/$f" "$PREFIX/bin/$f" && chmod 0755 "$PREFIX/bin/$f"
+    done
+    [ -f "$SRC/fake-run" ] && cp "$SRC/fake-run" "$PREFIX/bin/fake-run" && chmod 0755 "$PREFIX/bin/fake-run"
+    echo "  ✓ selesai. Wadah & app tidak berubah."
+elif [ "$1" = "ports" ]; then
+    # ------------------------------------------------- alpine ports
+    # Daftar port yang dipakai app + deteksi bentrok. Android menyembunyikan
+    # /proc/net/tcp dari app untrusted, jadi "port listening" dideteksi lewat
+    # percobaan koneksi (curl), bukan ss/netstat.
+    shift
+    G=$'\033[38;2;0;255;0m'; O=$'\033[38;2;255;135;0m'; D=$'\033[2;38;2;0;170;0m'; N=$'\033[0m'
+    printf '\n%s  Port di dalam wadah%s  %s(deteksi via koneksi; Android sembunyikan /proc/net)%s\n\n' "$G" "$N" "$D" "$N"
+
+    # Kumpulkan kandidat: (label, port) dari config app di dalam wadah
+    report() { # report <label> <port> <note>
+        local label=$1 port=$2 note=$3 state
+        if curl -s -o /dev/null -m 2 "http://127.0.0.1:$port/" 2>/dev/null; then
+            state="${G}● aktif${N}"
+        else
+            state="${D}○ idle${N}"
+        fi
+        printf '  %s%-22s%s %6s  %b  %s%s%s\n' "$O" "$label" "$N" "$port" "$state" "$D" "$note" "$N"
+    }
+
+    OC_CFG="$BASE/root/.config/opencode/service.json"
+    if [ -f "$OC_CFG" ]; then
+        p=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$OC_CFG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        [ -n "$p" ] && report "opencode (wadah)" "$p" "dari ~/.config/opencode/service.json"
+    fi
+
+    # opencode host: proses sedang jalan? port default 49374
+    if pgrep -f "$PREFIX/bin/opencode" >/dev/null 2>&1 || pgrep -x opencode >/dev/null 2>&1; then
+        report "opencode (host)" "49374" "proses host terlihat berjalan"
+    fi
+
+    # Deteksi bentrok: dua listen yang sama-sama memakai port sama
+    warn_conflict() { # warn_conflict <a-label> <a-port> <b-label> <b-port>
+        if [ -n "$2" ] && [ "$2" = "$4" ]; then
+            printf '\n  %s⚠ bentrok%s: %s dan %s sama-sama memakai port %s\n' "$O" "$N" "$1" "$3" "$2"
+        fi
+    }
+    ocp=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$OC_CFG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    warn_conflict "opencode (wadah)" "$ocp" "opencode (host)" "49374"
+
+    printf '\n  %sRingkasan: opencode wadah=%s, default host=49374%s\n' "$D" "${ocp:-belum diatur}" "$N"
+    echo
 elif [ "$1" = "-c" ]; then
     # alpine -c "command" — jalankan command string di dalam wadah
     shift
