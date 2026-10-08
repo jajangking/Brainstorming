@@ -181,8 +181,16 @@ if [ "$MODE" = svsp ]; then
     # bisa menanganinya. Handler SIGSYS in-process milik shim (fk_sigsys,
     # §34/§35 libfakeroot) menangkap & menjawab ENOSYS -> fallback libc
     # (faccessat) jalan. Biner statis mengabaikan LD_PRELOAD (tak efek).
+    # PENGECUALIAN: target-host bionic (/system dkk) + preload shim (musl)
+    # = CANNOT LINK saat load -> lewati preload (biner musl user di /data
+    # tetap dapat shim; exec host-bionic dari CUCU = celah terdokumentasi).
     ldp=()
-    [ -e "$SHIM" ] && ldp=("LD_PRELOAD=$SHIM")
+    if [ -e "$SHIM" ]; then
+        case "$host" in
+            /system/*|/apex/*|/vendor/*|/product/*) : ;;
+            *) ldp=("LD_PRELOAD=$SHIM") ;;
+        esac
+    fi
     exec env -i \
       FAKE_BASE="$HOME_BASE" \
       PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \

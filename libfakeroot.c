@@ -1011,11 +1011,23 @@ int unlinkat(int dirfd, const char *p, int fl) {
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(unlinkat, dirfd, b, fl); }
     return CALL(unlinkat, dirfd, p, fl);
 }
+/* §44: untuk syscall DUA-path (rename/link/renameat/...), tiap path
+ * dihitung sendiri: absolut -> rewrite ke base, RELATIF -> apa adanya.
+ * Dulu shim memanggil fk_rewrite() pada keduanya begitu salah satu
+ * absolut, sehingga path relatif ikut di-prefix base TANPA separator ->
+ * "…/alpine-rootfsegtest/PKG-INFO" -> ENOENT (device 2026-10-08:
+ * setuptools egg-info temp->PKG-INFO via os.replace(abs, relatif) gagal,
+ * uv sync/hermes installer). Relatif cukup diteruskan: kernel/
+ * supervisor me-resolve terhadap cwd yang benar. */
+static void fk_rewrite1(char *out, size_t n, const char *p) {
+    if (fk_is_abs(p)) fk_rewrite(out, n, p);
+    else snprintf(out, n, "%s", p);
+}
 int rename(const char *a, const char *b2) {
     NEXT(rename);
     if (fk_is_abs(a) || fk_is_abs(b2)) {
         char x[PATH_MAX], y[PATH_MAX];
-        fk_rewrite(x, sizeof x, a); fk_rewrite(y, sizeof y, b2);
+        fk_rewrite1(x, sizeof x, a); fk_rewrite1(y, sizeof y, b2);
         int r = CALL(rename, x, y);
         if (r < 0) fk_dbg("rename %s->%s (%s->%s) FAIL errno=%d", a, b2, x, y, errno);
         return r;
@@ -1026,7 +1038,7 @@ int renameat(int d1, const char *a, int d2, const char *b2) {
     NEXT(renameat);
     if (fk_is_abs(a) || fk_is_abs(b2)) {
         char x[PATH_MAX], y[PATH_MAX];
-        fk_rewrite(x, sizeof x, a); fk_rewrite(y, sizeof y, b2);
+        fk_rewrite1(x, sizeof x, a); fk_rewrite1(y, sizeof y, b2);
         return CALL(renameat, d1, x, d2, y);
     }
     return CALL(renameat, d1, a, d2, b2);
@@ -1035,7 +1047,7 @@ int renameat2(int d1, const char *a, int d2, const char *b2, unsigned f) {
     NEXT(renameat2);
     if (fk_is_abs(a) || fk_is_abs(b2)) {
         char x[PATH_MAX], y[PATH_MAX];
-        fk_rewrite(x, sizeof x, a); fk_rewrite(y, sizeof y, b2);
+        fk_rewrite1(x, sizeof x, a); fk_rewrite1(y, sizeof y, b2);
         return CALL(renameat2, d1, x, d2, y, f);
     }
     return CALL(renameat2, d1, a, d2, b2, f);
@@ -1044,7 +1056,7 @@ int link(const char *a, const char *b2) {
     NEXT(link);
     if (fk_is_abs(a) || fk_is_abs(b2)) {
         char x[PATH_MAX], y[PATH_MAX];
-        fk_rewrite(x, sizeof x, a); fk_rewrite(y, sizeof y, b2);
+        fk_rewrite1(x, sizeof x, a); fk_rewrite1(y, sizeof y, b2);
         return CALL(link, x, y);
     }
     return CALL(link, a, b2);
@@ -1053,7 +1065,7 @@ int linkat(int d1, const char *a, int d2, const char *b2, int fl) {
     NEXT(linkat);
     if (fk_is_abs(a) || fk_is_abs(b2)) {
         char x[PATH_MAX], y[PATH_MAX];
-        fk_rewrite(x, sizeof x, a); fk_rewrite(y, sizeof y, b2);
+        fk_rewrite1(x, sizeof x, a); fk_rewrite1(y, sizeof y, b2);
         return CALL(linkat, d1, x, d2, y, fl);
     }
     return CALL(linkat, d1, a, d2, b2, fl);

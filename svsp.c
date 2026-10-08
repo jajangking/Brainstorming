@@ -439,7 +439,16 @@ static int shebang_wrap(const char *H) {
     if (access(ih, X_OK) != 0) return 0;        /* interp memang tak ada */
 
     const char *host_sh = getenv("SVSP_HOST_SH");
-    if (!host_sh || !*host_sh) host_sh = "/system/bin/sh";
+    char bbsh[4352];
+    if (!host_sh || !*host_sh) {
+        /* Default: busybox wadah (BUKAN /system/bin/sh!). Sejak §40 env
+         * supervised membawa LD_PRELOAD=shim (musl) yg membuat sh host
+         * (bionic) gagal load (CANNOT LINK). busybox musl + shim = cocok.
+         * Argumen "sh" wajib (multicall butuh pemilih applet); override
+         * SVSP_HOST_SH dipakai mentah seperti dulu. */
+        snprintf(bbsh, sizeof bbsh, "%s/bin/busybox sh", base);
+        host_sh = bbsh;
+    }
     char loader[4352];
     const char *ld = getenv("SVSP_LOADER");
     if (ld && *ld) snprintf(loader, sizeof loader, "%s", ld);
@@ -511,6 +520,143 @@ static int shebang_wrap(const char *H) {
     DBG("shebang wrap: %s -> interp=%s%s%s\n", H, ih,
         sarg[0] ? " sarg=" : "", sarg[0] ? sarg : "");
     return 1;
+}
+
+/* ---- redirect loader utk ELF ber-INTERP stock (§43) ----
+ * Biner dinamis yg PT_INTERP-nya BUKAN loader patched (mis. hasil apk add /
+ * unduhan pasca-bootstrap) tak bisa dieksekusi langsung kernel host (host
+ * tak punya /lib/...): execve dari parent STATIS (re-exec shim tak ada)
+ * mati ENOENT — device 2026-10-08: python pm di-spawn uv statis.
+ * Solusi transparan TANPA bedah memori argv (tak muat) dan TANPA menyentuh
+ * isi biner (hash pm tetap valid): wrapper skrip sekali-tulis per path
+ * biner yg mengeksekusi LOADER dgn biner sbg argumen. Wrapper stabil
+ * (nama dari hash path + verifikasi isi) sehingga upgrade apk (ganti isi
+ * di path sama) tak basi. Rantai: child -> wrapper -> sh -> loader ->
+ * biner (2 exec ekstra, hanya utk biner stock). */
+static int elf_stock_interp(const char *H) {
+    /* 1 = ELF64 + punya PT_INTERP + interp tak berprefix base.
+     * 0 = selain itu (statik / tanpa INTERP / sudah patched / tak terbaca). */
+    int fd = open(H, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    unsigned char h[64];
+    ssize_t n = read(fd, h, sizeof h);
+    if (n < 64 || h[0] != 0x7f || h[1] != 'E' || h[2] != 'L' || h[3] != 'F' || h[4] != 2) {
+        close(fd); return 0;
+    }
+    unsigned long phoff = 0;
+    for (int i = 0; i < 8; i++) phoff |= (unsigned long)h[32 + i] << (8 * i);
+    unsigned phesz = h[54] | ((unsigned)h[55] << 8);
+    unsigned phnum = h[56] | ((unsigned)h[57] << 8);
+    if (phesz < 56 || phnum == 0 || phnum > 64 || phesz > 128) { close(fd); return 0; }
+    int need = 0;
+    for (unsigned i = 0; i < phnum; i++) {
+        unsigned char e[64];
+        ssize_t m = pread(fd, e, phesz < sizeof e ? phesz : sizeof e,
+                          (off_t)(phoff + (unsigned long)i * phesz));
+        if (m < 56) break;
+        unsigned type = (unsigned)e[0] | ((unsigned)e[1] << 8) |
+                        ((unsigned)e[2] << 16) | ((unsigned)e[3] << 24);
+        if (type != 3) continue;                       /* PT_INTERP */
+        unsigned long offp = 0, sz = 0;
+        for (int k = 0; k < 8; k++) {
+            offp |= (unsigned long)e[8 + k] << (8 * k);
+            sz   |= (unsigned long)e[32 + k] << (8 * k);
+        }
+        if (sz == 0 || sz > 4096) break;
+        char interp[4096];
+        m = pread(fd, interp, sz - 1, (off_t)offp);
+        close(fd);
+        if (m < 1) return 0;
+        interp[m] = '\0';
+        if (strncmp(interp, base, baselen) == 0 &&
+            (interp[baselen] == '/' || interp[baselen] == '\0'))
+            return 0;                                  /* sudah patched */
+        return 1;                                      /* stock -> butuh loader */
+    }
+    close(fd);
+    return need;
+}
+
+static unsigned long elf_wrap_hash(const char *s) {
+    unsigned long h = 1469598103934665603UL;           /* FNV-1a 64 */
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211UL; }
+    return h;
+}
+
+/* Buat (bila belum ada & cocok) wrapper utk REALBIN (host-absolut).
+ * Tulis path wrapper ke wbuf. Return 0 sukses. */
+static int elf_wrap(const char *realbin, char *wbuf, size_t wcap) {
+    const char *host_sh = getenv("SVSP_HOST_SH");
+    char bbsh[4352], shbin[4352];
+    if (!host_sh || !*host_sh) {
+        /* Sama spt shebang_wrap: busybox wadah + " sh", bukan sh host
+         * (bionic + LD_PRELOAD shim = CANNOT LINK sejak §40). */
+        snprintf(shbin, sizeof shbin, "%s/bin/busybox", base);
+        snprintf(bbsh, sizeof bbsh, "%s sh", shbin);
+        host_sh = bbsh;
+    } else {
+        snprintf(shbin, sizeof shbin, "%s", host_sh);
+    }
+    char loader[4352];
+    const char *ld = getenv("SVSP_LOADER");
+    if (ld && *ld) snprintf(loader, sizeof loader, "%s", ld);
+    else snprintf(loader, sizeof loader, "%s/lib/ld-musl-patched.so.1", base);
+    if (access(loader, X_OK) != 0) return -1;
+    if (access(shbin, X_OK) != 0) return -1;
+
+    char dir[4608];
+    snprintf(dir, sizeof dir, "%s/.svsp-elfwrap", base);
+    mkdir(dir, 0755);                                  /* ada -> abaikan */
+
+    unsigned long hh = elf_wrap_hash(realbin);
+    char wp[4608], tmp[4608];
+    int i;
+    for (i = 0; i < 8; i++) {
+        if (i == 0) snprintf(wp, sizeof wp, "%s/%016lx", dir, hh);
+        else snprintf(wp, sizeof wp, "%s/%016lx.%d", dir, hh, i);
+        int fd = open(wp, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            char c[1024];
+            ssize_t m = read(fd, c, sizeof c - 1);
+            close(fd);
+            if (m > 0) {
+                c[m] = '\0';
+                char *rl = strstr(c, "\n# real: ");
+                if (rl) {
+                    rl += 9;
+                    char *e = strchr(rl, '\n');
+                    if (e) *e = '\0';
+                    if (strcmp(rl, realbin) == 0) break;  /* cocok, pakai */
+                }
+            }
+            continue;                                  /* tabrakan, sufiks */
+        }
+        snprintf(tmp, sizeof tmp, "%s.tmp.%d", wp, (int)getpid());
+        int d = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+        if (d < 0) return -1;
+        char wb[9000];
+        int len = snprintf(wb, sizeof wb,
+            "#!%s\n"
+            "# svsp-elf-wrapper v1 (otomatis oleh svsp utk biner INTERP-stock; jangan diedit)\n"
+            "# real: %s\n"
+            "exec \"%s\" \"%s\" \"$@\"\n",
+            host_sh, realbin, loader, realbin);
+        int bad = (len < 0 || (size_t)len >= sizeof wb);
+        ssize_t w = 0;
+        while (!bad && w < len) {
+            ssize_t k = write(d, wb + w, (size_t)(len - w));
+            if (k < 0) { bad = 1; break; }
+            w += k;
+        }
+        if (close(d) < 0) bad = 1;
+        if (bad) { unlink(tmp); return -1; }
+        if (rename(tmp, wp) < 0) { unlink(tmp); return -1; }
+        break;
+    }
+    if (i >= 8) return -1;
+    if (strlen(wp) + 1 > wcap) return -1;
+    strcpy(wbuf, wp);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -990,14 +1136,46 @@ static void handle(int listener, const struct seccomp_notif *req) {
             else { snprintf(hc, sizeof hc, "%s/%s", base, pbuf); hp = hc; }
             shebang_wrap(hp);
         }
-        /* TODO §43 (device 2026-10-08): redirect loader transparan. Biner
-         * dinamis ber-INTERP stock (mis. hasil apk add/unduhan, dirujuk
-         * kernel host yg tak punya /lib) yang dieksekusi DARI parent
-         * statis (tak ada re-exec shim) mati ENOENT di sini. Solusi:
-         * deteksi ELF+INTERP stock lalu tulis wrapper skrip sekali-pakai
-         * `exec -a $0 LOADER REAL "$@"` (mirip shebang_wrap, tapi tanpa
-         * rename sehingga upgrade apk tak basi). Hari ini: jalankan ulang
-         * bootstrap.sh (rewrite INTERP, idempoten) — lihat README. */
+        /* §43: ELF ber-INTERP stock -> redirect via wrapper loader.
+         * Berlaku umum (baik changed maupun tidak: `fake-run --svsp`
+         * langsung pun mewarisi path host-real yg passthrough). Syarat
+         * ketat agar biner host/bionic JANGAN dibungkus: lewati bila pbuf
+         * absolut berprefix host TAPI di luar base (catatan: base sendiri
+         * di bawah /data/, jadi "$BASE/..." harus tetap lolos!). Target
+         * bungkus (pout) wajib di dalam base. Gagal wrap/redirect -> jatuh
+         * ke logika lama di bawah (tanpa regresi). */
+        {
+            char wrap[4608];
+            int is_host_abs = (pbuf[0] == '/' && host_pass_prefix(pbuf) &&
+                               strncmp(pbuf, base, baselen) != 0);
+            if (!is_host_abs &&
+                strncmp(pout, base, baselen) == 0 &&
+                elf_stock_interp(pout) &&
+                elf_wrap(pout, wrap, sizeof wrap) == 0) {
+                size_t wlen = strlen(wrap);
+                const char *w = NULL;
+                char wrel[4096];
+                if (wlen <= (size_t)oldlen) {
+                    w = wrap;
+                } else if (rel_from_cwd(pid, wrap, wrel, sizeof wrel) == 0 &&
+                           strlen(wrel) <= (size_t)oldlen) {
+                    w = wrel;
+                }
+                if (w) {
+                    DBG("execve elf-wrap: [%s] -> [%s]\n", pbuf, w);
+                    errno = 0;
+                    if (write_mem(pid, pathp, w, strlen(w) + 1) < 0) {
+                        DBG("execve elf-wrap write_mem gagal (errno=%d)\n", errno);
+                    } else {
+                        send_resp(listener, req->id, 0, 0,
+                                  SECCOMP_USER_NOTIF_FLAG_CONTINUE);
+                        break;
+                    }
+                } else {
+                    DBG("execve elf-wrap muat tak cukup: %s\n", wrap);
+                }
+            }
+        }
         /* path RELATIF tak berubah: tak ada yang perlu di-rewrite di memori
          * child (lagi pula string bisa di .rodata) -> langsung CONTINUE. */
         if (!changed) {
