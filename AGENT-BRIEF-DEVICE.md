@@ -373,3 +373,22 @@ hanya cadangan terakhir; nilainya juga disegarkan untuk anak. Kandidat #2 Anda.
 
 Bila ada yang masih gagal, lampirkan kontrol A/B seperti ronde 11 — format itu
 sangat membantu.
+
+---
+
+# PENUTUP — tidak ada ronde 13 (kecuali ada temuan)
+
+Ronde 12 menutup semuanya: reproduksi ronde 11 bersih, jalur manusia hijau,
+nested dua tingkat hijau, selftest 0 FAIL, matriks svsp+shim 4/4.
+**Proyek selesai** (HANDOFF §31).
+
+Catatan terima kasih yang serius: dua bug terakhir — `getcwd` silang-namespace
+(ronde 8) dan `FAKEROOT_EXE` basi (ronde 11) — **tidak akan ketemu** lewat brief
+saya. Yang pertama datang dari diagnostik Anda sendiri, yang kedua dari inisiatif
+Anda menguji di luar brief memakai error pemakaian nyata. Kontrol A/B dan
+protokol keadaan bersih Anda yang membuat semua angka ini layak dipercaya.
+
+**Tidak ada tugas baru.** Bila nanti ada perubahan kode dari sisi Arena, brief
+ronde berikutnya akan ditulis di bawah bagian ini. Bila Anda sendiri menemukan
+sesuatu saat pemakaian, silakan lapor seperti ronde 11 — format itu ideal:
+error mentah → reproduksi → kontrol A/B → kandidat perbaikan.

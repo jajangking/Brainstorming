@@ -1771,3 +1771,53 @@ Matriks "12/12" hanya menguji jalur peluncuran langsung. Brief ronde 12 karena
 itu menambahkan **jalur pemakaian manusia**: masuk `alpine` interaktif →
 ketik `opencode`, plus nested dua tingkat. Workaround device (`FAKEROOT_EXE=
 opencode`) tak diperlukan lagi bila fix ini benar.
+
+## 31. PENUTUPAN — OpenCode di dalam wadah: SELESAI & TERVERIFIKASI
+
+`device-feedback/ronde12.md` (basis `a6a628b`) menutup kasus terakhir:
+
+| Sasaran | Hasil |
+|---|---|
+| Reproduksi ronde 11 tanpa workaround | ✅ TUI render; `can't open 'serve'` hilang |
+| Jalur pemakaian manusia (`alpine` → ketik `opencode`, lalu `--standalone`) | ✅ keduanya render |
+| Nested dua tingkat (shell → `sh -c` → opencode) | ✅ render |
+| `./selftest` | ✅ 0 FAIL |
+| Matriks kasus 3 & 4, svsp + shim | ✅ 4/4 |
+
+Bukti paling tajam untuk §30 — inspeksi `/proc` saat opencode hidup:
+
+```
+cmdline : $B/root/.opencode/bin/opencode --standalone
+exe     : $B/root/.opencode/bin/opencode    <- kebenaran kernel (dipakai)
+env     : FAKEROOT_EXE=$B/bin/sh            <- MASIH basi, tapi tak lagi dipercaya
+```
+
+Env warisan memang tak bisa diubah dari parent; yang penting ia **tidak lagi
+menang** atas kebenaran per-proses. Itulah inti §30.
+
+### 31.1 Status akhir proyek
+
+Dua tugas besar tuntas dan terverifikasi di perangkat:
+
+1. **Bug wadah §17** — ditutup ronde 4 (`selftest` 0 FAIL).
+2. **OpenCode di dalam wadah** — ditutup ronde 12: matriks 12/12 (ronde 9),
+   selftest 0 FAIL, dan **jalur pemakaian manusia** (ronde 12) hijau.
+
+Ketiga jalur (natif, svsp, shim) menjalankan OpenCode penuh: `--help`, `serve`,
+spawn anak, dan `--standalone`.
+
+### 31.2 Yang sengaja dibiarkan (bukan kelalaian)
+
+- `O_PATH|O_NOFOLLOW` pada simlink → ELOOP di svsp. Batas arsitektural: ADDFD
+  menolak fd `FMODE_PATH` dan tak ada fd pengganti yang mewakili simlink.
+- `pwd` logis tetap `/root` sesudah `cd /root` eksplisit — itu `$PWD` shell dari
+  argumen yang diketik, bukan `getcwd`; di luar jangkauan shim, tanpa dampak.
+- `FAKE_VIEW=container` tetap sekadar escape hatch (default host terbukti aman).
+
+### 31.3 Pelajaran metodologis (dicatat agar tak terulang)
+
+Matriks "12/12" sempat memberi rasa aman palsu: semua tes meluncurkan biner
+**langsung**, sementara manusia memakai wadah dengan **masuk shell lalu
+mengetik perintah**. Bug §30 hidup persis di celah itu dan hanya ketahuan
+karena device menguji di luar brief. Brief berikutnya harus selalu memuat
+minimal satu jalur "pemakaian manusia", bukan hanya pemanggilan terprogram.
