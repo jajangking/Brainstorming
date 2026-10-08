@@ -125,7 +125,73 @@ chk "fake-run SBARGS (busybox sh -c)" "$(printf '%s' "$OUT" | grep -q 'SBARGS-ok
 bash "$FR" /bin/busybox test -e /data/data/com.termux/files/home >/dev/null 2>&1; RC=$?
 chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.2)"
 
-# --- 8. pembersihan ----------------------------------------------------------
+# --- 8. MATRIX REGRESI §40-§45 (ronde 19, device 2026-10-08) -------------------
+# Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
+# ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
+# membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
+info "=== matrix regresi §40-§45 ==="
+
+# §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
+# SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
+OUT=$(bash "$FR" --svsp bash -c 'uname -s' 2>&1); RC=$?
+if [ $RC -eq 0 ] && printf '%s' "$OUT" | grep -q 'Linux'; then
+    pass "§40 svsp+bash: uname -s = Linux (tanpa SIGSYS)"
+else
+    fail "§40 svsp+bash: uname -s" "rc=$RC out=$(printf '%s' "$OUT" | head -1)"
+fi
+OUT=$(bash "$FR" --svsp bash -c 'test -x /bin/ls && echo XOK' 2>&1); RC=$?
+chk "§40 svsp+bash: PATH-lookup test -x" "$(printf '%s' "$OUT" | grep -q XOK; echo $?)" "out=$(printf '%s' "$OUT" | head -1)"
+
+# §42 Node/Bun memanggil io_uring_setup yang di-trap Android; ENOSYS membuat
+# libuv menutup ringfd tak-invalid lalu abort. Shim harus jawab fd /dev/null.
+# (Hanya dicek bila ada biner node di wadah — tidak dipasang default.)
+NODEBIN="$(find "$BASE/root" -type f -name node -path '*node*/bin/node' 2>/dev/null | head -1)"
+if [ -n "$NODEBIN" ]; then
+    OUT=$(bash "$FR" "$NODEBIN" -e 'console.log("SELFTEST-NODE-OK")' 2>&1); RC=$?
+    chk "§42 node -e (io_uring guard)" "$(printf '%s' "$OUT" | grep -q 'SELFTEST-NODE-OK'; echo $?)" "out=$(printf '%s' "$OUT" | tail -1)"
+else
+    info "§42 dilewati: biner 'node' tak ada di wadah"
+fi
+
+# §44 syscall dua-path (rename/link) tidak boleh me-rewrite path RELATIF jadi
+# $BASE+rel (tanpa separator) -> ENOENT. Pola setuptools egg-info.
+OUT=$(bash "$FR" --svsp bash -c 'mkdir -p /tmp/.st44/sub && echo hi > /tmp/.st44/a && mv /tmp/.st44/a /tmp/.st44/sub/b && cat /tmp/.st44/sub/b' 2>&1); RC=$?
+chk "§44 rename abs->rel" "$(printf '%s' "$OUT" | grep -q '^hi$'; echo $?)" "out=$(printf '%s' "$OUT" | tail -1)"
+rm -rf "$BASE/tmp/.st44" 2>/dev/null
+
+# §43 binary ber-INTERP-stock yang di-exec dari parent statis harus di-redirect
+# supervisor lewat wrapper ~/.svsp-elfwrap (tak boleh ENOENT). Dipakai binary
+# dummy yang INTERP-nya sengaja dikembalikan ke loader stock.
+# CATATAN: salinan HARUS tetap bernama 'busybox' di direktinya sendiri — busybox
+# memakai argv[0] sebagai pemilih applet, jadi 'nama-lain' -> "applet not found".
+STOCKDIR="$BASE/tmp/.selftest-stock"
+mkdir -p "$STOCKDIR" 2>/dev/null
+cp "$BASE/bin/busybox" "$STOCKDIR/busybox" 2>/dev/null && chmod +x "$STOCKDIR/busybox" 2>/dev/null
+STOCKBIN="$STOCKDIR/busybox"
+if [ -x "$STOCKBIN" ] && command -v patchelf >/dev/null 2>&1; then
+    patchelf --set-interpreter /lib/ld-musl-aarch64.so.1 "$STOCKBIN" 2>/dev/null
+    OUT=$(bash "$FR" --svsp "$STOCKBIN" echo SELFTEST-43-OK 2>&1); RC=$?
+    chk "§43 ELF INTERP-stock via svsp" "$(printf '%s' "$OUT" | grep -q 'SELFTEST-43-OK'; echo $?)" "rc=$RC out=$(printf '%s' "$OUT" | tail -1)"
+    rm -rf "$STOCKDIR"
+else
+    info "§43 dilewati: busybox/patchelf tak tersedia untuk binary uji"
+    rm -rf "$STOCKDIR" 2>/dev/null
+fi
+
+# §45 svsp tidak boleh membuang LD_LIBRARY_PATH (biner glibc butuh path custom;
+# regresi bila suatu saat ada yang meng-unset-nya lagi).
+SVSP_SRC="$SELF_DIR/svsp.c"
+if [ -f "$SVSP_SRC" ]; then
+    if grep -q 'unsetenv("LD_LIBRARY_PATH")' "$SVSP_SRC"; then
+        fail "§45 svsp tidak unset LD_LIBRARY_PATH" "unsetenv LD_LIBRARY_PATH ada lagi di svsp.c"
+    else
+        pass "§45 svsp tidak unset LD_LIBRARY_PATH"
+    fi
+else
+    info "§45 dilewati: svsp.c tak ditemukan di $SELF_DIR"
+fi
+
+# --- 9. pembersihan ----------------------------------------------------------
 info "cleanup: purge $PKG ..."
 bash "$FR" apk del --no-scripts "$PKG" >/dev/null 2>&1
 if bash "$DOC" --base="$BASE" >/dev/null 2>&1; then

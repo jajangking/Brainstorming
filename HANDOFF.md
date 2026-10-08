@@ -2196,3 +2196,59 @@ sebagai satu perintah opsional. Hasilnya tidak mengubah keputusan §39.2.
 
 Unduh Python Hermes masih tersangkut `dns error`/`EAI_AGAIN` — jaringan, bukan
 wadah. Tidak ada tindakan kode.
+
+---
+
+## 40. RONDE 19–20 — Hermes Agent ✅ + batas keras glibc (2026-10-08)
+
+Hari ini: **Hermes Agent v0.21.6 terinstall penuh di wadah (`installer rc=0`)**
+setelah 9 percobaan, dan matriks glibc ditutup (jawaban: mustahil). Lima bug
+distro ditemukan+diperbaiki; semuanya kini punya **regression test otomatis**
+di `selftest` §8.
+
+### 40.1 Ringkasan perubahan (semua sudah push ke `main`)
+
+| § | Simtom | Akar masalah | Fix |
+|---|---|---|---|
+| 40 | `fake-run --svsp bash` mati SIGSYS (rc=159) | trap `faccessat2` tiba **sebelum** notif svsp; `svsp` meng-`unsetenv("LD_PRELOAD")` sehingga tak ada handler in-process | `fake-run` suntik `LD_PRELOAD=$SHIM` di cabang `--svsp`; `svsp` tak lagi unset |
+| 42 | Node.js 26 abort (`uv__close: fd > STDERR_FILENO`) | `io_uring_setup` di-trap Android → ENOSYS → libuv **fail path** menutup ringfd invalid | handler `fk_sigsys` jawab `io_uring_setup` dgn fd `/dev/null` asli (svc mentah, aman di signal handler) |
+| 43 | pm-python ber-INTERP-stock: ENOENT dari parent statis | tak ada re-exec shim (parent statis) | supervisor buat wrapper stabil `~/.svsp-elfwrap/<hash>` → `busybox sh → loader patched → biner`; isi diverifikasi, upgrade paket tak basi |
+| 43b | wrapper shebang `CANNOT LINK` | default `#!/system/bin/sh` (bionic) + preload shim (musl) | default jadi `#!/$BASE/bin/busybox sh` |
+| 44 | `os.replace(abs, 'rel')` → ENOENT (setuptools egg-info) | shim me-rewrite **kedua** path saat salah satu absolut → relatif jadi `$BASE+rel` (tanpa separator) | helper `fk_rewrite1()`: absolut rewrite, relatif apa adanya |
+| 45 | biner glibc tak_find libc yang benar | `svsp` meng-`unsetenv("LD_LIBRARY_PATH")` | `LD_LIBRARY_PATH` dipertahankan (fake-run tetap menyetelnya) |
+
+### 40.2 Jejak baru yang ditemukan (bukan untuk diubah, cuma dicatat)
+
+- **`set_robust_list` = kill non-deliverable.** Semua proses glibc memanggilnya
+  saat init TLS; Android membunuhnya tanpa opportunity handler (probe musl
+  statis + shim pun mati). `GLIBC_TUNABLES=glibc.pthread.robust_list=0` hanya
+  melewati yang pertama. ⇒ **glibc mustahil** di fake-chroot ini → `proot-distro`.
+- **`gcompat` parsial**: simbol regex (`re_search`, `re_compile_pattern`) dan
+  `mallopt` tidak diimplementasikan → tak cukup untuk binary modern.
+- **Hardlink `ln` (tanpa `-s`) → EACCES**: restriksi SELinux Android
+  (terbukti juga di host Termux, bukan isu wadah).
+- **Transient jaringan seluler**: unduhan besar (Node 34 MiB) putus di ~82%
+  → `Connection aborted`; install ulang (resume) langsung lolos. Bukan bug.
+
+### 40.3 `selftest` punya matrix regresi §40–§45
+
+`./selftest` sekarang punya bagian **§8 matrix regresi**: 6 check yang
+menguji tiap bug di atas secara langsung (bukan statis-grep). Terbukti
+menangkap regresi: menyabotase `fake-run` (matikan preload di `--svsp`)
+→ selftest melaporkan **3 FAIL** (§40 dua check + §44 ikut, karena keduanya
+sekitar jalur supervised dynamic); setelah dipulihkan → **0 FAIL**.
+Jalankan `./selftest` setelah menyentuh shim/svsp/fake-run.
+
+### 40.4 Dua pendekatan yang gagal (agar tak diulang)
+
+- **Optimasi `is_dynamic` (§46, sudah DIBATALKAN)**: mengganti `readelf`
+  dengan 2×`od` + cache. A/B interleaved 3×: **bottleneck-nya bukan di
+  situ** — ongkos ~150ms/fake-run datang dari rantai `env -i` + exec
+  loader musl + `libtermux-exec` preload yang disuntik Termux, bukan deteksi
+  ELF. Versi baru malah sedikit lebih lambat → di-revert. Optimasi yang
+  layak usaha nanti adalah memangkas ongkos exec, bukan parsing.
+- **`sigguard.c`** (handler SIGSYS libc-agnostic untuk glibc): constructor-nya
+  **tidak dijalankan** loader glibc (file di-`openat` terbaca, tapi
+  `DT_INIT_ARRAY` tak dieksekusi → nol `rt_sigaction` di trace). Tetap di
+  repo sebagai referensi pola (freestanding, offset ABI aarch64), bukan
+  sebagai solusi glibc.
