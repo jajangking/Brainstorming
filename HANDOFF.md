@@ -1995,3 +1995,46 @@ handler SIGSYS sendiri, karena di sana tak ada shim yang menjaga handler.
 Opsi yang tersedia bila ini mengganggu: preload shim mini "sigsys-guard"
 (hanya handler, tanpa rewrite path) juga di jalur svsp. **Belum dikerjakan** —
 menunggu device mengonfirmasi apakah kasus ini nyata dipakai.
+
+## 36. RONDE 15 — SIGSYS tuntas; keputusan: TIDAK menambah "sigsys-guard"
+
+`device-feedback/ronde15.md` (basis `2ae7356`): **§35 terverifikasi di perangkat.**
+
+| Sasaran | Hasil |
+|---|---|
+| Regresi: `selftest`, `alpine`→`opencode`, `apk add/del tree` | ✅ 3/3 (0 FAIL, TUI render, add/del bersih) |
+| `trap ":" EXIT; echo "[$(uname -s)]"` | ✅ `[Linux]` (ronde 14: kosong) |
+| `trap ":" EXIT; x=$(env)` | ✅ panjang 601 (ronde 14: kosong) |
+| Hermes dgn shim: `Bad system call` | ✅ **HILANG** |
+| Perubahan perilaku akibat interposisi sigaction | ✅ nihil teramati |
+
+Installer Hermes kini lolos `check_platform` dan berhenti **wajar** di
+`git is required` — murni prasyarat lingkungan (git belum dipasang di wadah),
+bukan bug. Device juga mencatat bahwa deteksi Termux tidak muncul lewat jalur
+`alpine`/`fake-run`, karena whitelist `env -i` memang tidak meneruskan
+`TERMUX_VERSION`/`PREFIX` host — efek samping yang kebetulan menguntungkan.
+
+### 36.1 Keputusan: "sigsys-guard" untuk jalur svsp TIDAK dibuat
+
+Saya bertanya apakah kasusnya nyata; device menjawab jujur **tidak**: program
+dinamis (bash, opencode, apk) selalu lewat jalur shim, sementara `svsp` dipakai
+untuk biner **statis**; uji `--svsp` pada kasus `trap` di ronde 14 murni
+penasaran. Maka komponen baru itu **tidak dikerjakan** — manfaat minim untuk
+pemakaian riil, dan setiap komponen tambahan adalah utang pemeliharaan.
+
+Batas yang tetap berlaku & didokumentasikan: **jalur svsp rentan** bila suatu
+saat program dinamis ber-`trap` dijalankan di sana (filter Android `RET_TRAP`
+mengalahkan `RET_USER_NOTIF` svsp — lihat §35.2). Bila kasus itu muncul nyata,
+solusinya sudah dirancang tinggal dibuat.
+
+### 36.2 Konsekuensi teoretis yang diterima sadar
+
+Aplikasi yang membaca balik handler SIGSYS-nya akan melihat "miliknya tercatat"
+padahal kernel memegang milik shim. Belum memicu masalah pada program yang
+diuji; dicatat agar tidak membingungkan di kemudian hari.
+
+### 36.3 Status
+
+Rangkaian SIGSYS (§34 ENOSYS → §35 anti-timpa) **selesai**. Proyek kembali ke
+status tertutup seperti §33, dengan tambahan: installer pihak ketiga yang
+memakai `trap` + pencarian PATH kini jalan di dalam wadah.

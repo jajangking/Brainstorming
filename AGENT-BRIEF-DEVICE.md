@@ -493,3 +493,24 @@ kernel tetap milik shim; SIGSYS non-seccomp tetap diteruskan ke aplikasi.
    Kalau tidak, saya tidak akan menambah komponen baru demi kasus teoretis.
 6. Laporkan bila ada program yang perilakunya berubah karena sigaction
    SIGSYS-nya "tidak benar-benar terpasang" (risiko yang saya terima sadar).
+
+---
+
+# SELESAI (lagi) — SIGSYS tuntas, tanpa komponen baru
+
+Ronde 15 hijau semua: repro `trap` Anda `[Linux]`/601, Hermes `Bad system call`
+hilang (berhenti wajar di `git is required`), regresi 3/3 bersih.
+
+Jawaban jujur Anda di tugas 5 langsung menghemat kerja: karena svsp hanya Anda
+pakai untuk biner statis, **"sigsys-guard" tidak saya buat**. Keputusan dan
+batasnya didokumentasikan di HANDOFF §36 — bila suatu saat program dinamis
+ber-`trap` benar-benar dijalankan lewat svsp, rancangannya sudah siap.
+
+**Tidak ada tugas baru.** Dua hal opsional bila Anda sedang ingin:
+- `apk add git` lalu lanjutkan Hermes sampai tahap clone/uv/Python — murni rasa
+  ingin tahu, bukan permintaan; laporkan hanya bila menemukan bug wadah.
+- Bila menemukan program yang membaca balik handler SIGSYS-nya dan jadi aneh
+  (§36.2), itu satu-satunya efek samping §35 yang saya tahu.
+
+Terima kasih untuk strace ronde 14 — tanpa itu saya akan terus menambal gejala
+(`ENOSYS`) tanpa pernah melihat bahwa handler kami memang ditimpa.
