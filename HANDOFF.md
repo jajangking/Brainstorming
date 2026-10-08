@@ -1848,3 +1848,39 @@ tulis default `{ "port": 49474 }`. Konservatif & idempoten:
 Catatan: ini hanya menolong instalasi baru. Device sudah menetapkan 49474
 sebagai baseline permanen di perangkatnya (dan membatalkan langkah "restore
 49374" — mengembalikannya justru mengulang insiden); keputusan itu saya adopsi.
+
+## 33. RONDE 13 — §32 terverifikasi; PROYEK DITUTUP
+
+`device-feedback/ronde13.md` (basis `bee7471`): **3/3 hijau**.
+
+| Sasaran | Hasil |
+|---|---|
+| Install dgn config lama | ✅ RC=0, config **tak berubah** (md5 identik) + log "config service sudah ada, dibiarkan" |
+| Jalur instalasi baru (config dipindah) | ✅ file dibuat berisi persis `{ "port": 49474 }` + log yang benar; config asli dikembalikan utuh |
+| Asap | ✅ `alpine` → `opencode` TUI render; `./selftest` **0 FAIL** |
+
+Catatan device `PT_INTERP: 24 → 23 file`: **bukan regresi**. Daemon opencode
+milik user sedang hidup → binernya ETXTBSY → `rc=4` "dilewati (sedang
+dieksekusi)", jalur yang memang sudah didesain sebagai bukan-kegagalan, dan
+INTERP biner itu sudah terpasang dari install sebelumnya (dampak nol). Pada
+install paling awal kondisi ini mustahil. Tidak ada tindakan kode.
+
+### 33.1 Status akhir
+
+Proyek **ditutup**. Dua tugas besar selesai & terverifikasi di perangkat:
+
+1. **Bug wadah §17** — ronde 4 (`selftest` 0 FAIL).
+2. **OpenCode di dalam wadah** — ronde 12 (matriks 12/12, jalur pemakaian
+   manusia, nested), ditambah §32 (default port) yang diverifikasi ronde 13.
+
+Sisa yang **sadar dibiarkan**, semuanya terdokumentasi: `O_PATH|O_NOFOLLOW`
+pada simlink (ELOOP, batas arsitektural ADDFD); `pwd` logis `/root`
+(`$PWD` shell, bukan `getcwd`); `FAKE_VIEW=container` sebagai escape hatch;
+§32 hanya berlaku untuk instalasi baru (tidak menimpa config yang sudah ada).
+
+### 33.2 Arsip jalur bug OpenCode (ronde 5 → 13)
+
+`ADDFD` vs `O_PATH` (§25) → `/proc/self/exe` & `FAKEROOT_EXE` (§26) →
+`realpath` namespace (§27) → `getcwd` namespace (§28) → env basi pada nested
+(§30) → default port kembar (§32). Dua di antaranya (§28, §30) hanya ketemu
+karena device menguji **di luar brief** — pelajaran metodologis di §31.3.

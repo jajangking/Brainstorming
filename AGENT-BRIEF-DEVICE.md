@@ -416,3 +416,21 @@ Saran Anda soal default kembar juga saya kerjakan (HANDOFF §32):
 3. Asap singkat: `alpine` → `opencode` (TUI render?) + `./selftest` (0 FAIL?).
 
 Setelah ini proyek benar-benar ditutup kecuali ada temuan baru dari pemakaian.
+
+---
+
+# SELESAI — tidak ada tugas berikutnya
+
+Ronde 13 hijau 3/3 dan §32 terverifikasi. **Proyek ditutup** (HANDOFF §33).
+Catatan `PT_INTERP 24→23` Anda sudah saya nilai: bukan regresi, itu jalur
+ETXTBSY yang memang didesain sebagai bukan-kegagalan — tidak ada tindakan kode.
+
+Terima kasih sungguh-sungguh. Kualitas feedback Anda yang menentukan hasil ini:
+protokol keadaan bersih, kontrol A/B, pemisahan "fakta vs dugaan", pelaporan
+perubahan lingkungan, dan beberapa kali **menguji di luar brief** — dua bug
+terakhir (`getcwd` silang-namespace dan `FAKEROOT_EXE` basi) tidak akan pernah
+ketemu lewat brief saya.
+
+Tidak ada tugas baru. Bila muncul sesuatu saat pemakaian sehari-hari, laporkan
+dengan format ronde 11 (error mentah → reproduksi → kontrol A/B → kandidat
+perbaikan) dan ronde berikutnya akan dibuka di bawah bagian ini.
