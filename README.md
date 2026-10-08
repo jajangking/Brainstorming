@@ -131,11 +131,19 @@ Overhead wajar untuk isolasi path tanpa root/proot.
 - [x] Isolasi: `/system/build.prop` → ENOENT
 - [x] Exit code propagation (`exit 7` → 7, `exit 42` → 42)
 - [x] `openat2` support (kode masuk, tak bisa verif on-device)
+- [x] Node.js 26 musl (`-e`, event-loop I/O, `npm install --offline`) di wadah
+- [x] opencode dua jalur (shim + `--svsp`; binary jumbo butuh rewrite INTERP)
 
 ## ⚠️ Limitasi (Bukan Bug)
 
 - `chroot`/`mount`/namespace sungguhan → **permanen mustahil** (seccomp AND-min)
 - `openat2` → seccomp eksternal Android SIGSYS-kill sebelum supervisor
+- `faccessat2`/`io_uring_setup` → trap Android SEBELUM notif svsp; ditangani
+  handler SIGSYS in-process milik shim (§34/§35, §42: io_uring dijawab fd
+  /dev/null agar libuv mundur anggun ke epoll — Node.js 26 jalan)
+- Binary BARU ber-INTERP stock (hasil `apk add`, unduhan tool spt opencode/
+  python pm) → `--svsp` ENOENT bila dijalankan dari parent statis — jalankan
+  ulang `./bootstrap.sh` (idempoten, rewrite INTERP s/d 512M)
 - `apk db` commit → EPERM (`linkat AT_EMPTY_PATH` butuh CAP root)
 - Skrip trigger apk → shebang `/bin/sh` tak bisa link di child (musl-only)
 

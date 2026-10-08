@@ -67,8 +67,36 @@ static const char *fk_base;
 static struct sigaction fk_app_sigsys;
 static int fk_app_sigsys_set;
 
-static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {
-    ucontext_t *uc = uctx;
+/* openat mentah (svc langsung, tanpa libc) utk dipakai di dalam handler
+ * sinyal — aman karena tak menyentuh lock/heap libc. Dipakai §42. */
+static long fk_raw_syscall3(long n, long a, long b, long c) {
+    register long x0 asm("x0") = a;
+    register long x1 asm("x1") = b;
+    register long x2 asm("x2") = c;
+    register long x8 asm("x8") = n;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory");
+    return x0;
+}
+/* Buka /dev/null (host == wadah, tak perlu rewrite). Ulangi bila dapat
+ * fd 0..2 (jangan serahkan fd stdio ke pemanggil!), maksimal 4x. */
+static int fk_raw_open_devnull(void) {
+    static const char dn[] = "/dev/null";
+    int fd = -1, i;
+    for (i = 0; i < 4; i++) {
+        long r = fk_raw_syscall3(56 /* SYS_openat */,
+                                 (long)-100 /* AT_FDCWD */,
+                                 (long)dn,
+                                 (long)0x80000 /* O_CLOEXEC */);
+        if ((unsigned long)r > (unsigned long)-4096) { fd = -1; break; }
+        fd = (int)r;
+        if (fd > 2) break;
+        /* fd 0..2: biarkan terbuka (bocor 1 fd, tapi jarang terjadi —
+         * io_uring_setup hanya sekali per loop) agar open berikut naik. */
+    }
+    return (fd > 2) ? fd : -1;
+}
+
+static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {    ucontext_t *uc = uctx;
     (void)sig;
 
     /* Bukan trap seccomp (mis. raise(SIGSYS) oleh program): bukan urusan kita,
@@ -101,6 +129,20 @@ static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {
     case SYS_setgroups: case SYS_setfsuid: case SYS_setfsgid:
         uc->uc_mcontext.regs[0] = 0;                 /* sukses */
         break;
+#ifdef SYS_io_uring_setup
+    case SYS_io_uring_setup: {
+        /* §42 (device 2026-10-08): JANGAN jawab ENOSYS. Fail path libuv
+         * (bundled node) menutup ringfd yang tak pernah valid (-1/0) ->
+         * abort (uv__close: fd > STDERR_FILENO), bahkan `node -e 1` mati.
+         * Beri fd /dev/null ASLI: pemeriksaan fitur libuv tetap gagal
+         * (params nol) sehingga ia mundur anggun ke epoll, dan fd-nya
+         * valid untuk ditutup. Mentah via svc (tanpa libc: handler sinyal
+         * tak boleh memanggil fungsi ber-lock). */
+        int fdf = fk_raw_open_devnull();
+        uc->uc_mcontext.regs[0] = (unsigned long)(fdf < 0 ? -ENOSYS : fdf);
+        break;
+    }
+#endif
     default:
         /* §34: syscall terblokir yang TIDAK kita kenal harus dijawab
          * -ENOSYS, bukan -EPERM. libc (musl/glibc) memakai ENOSYS sebagai
@@ -342,6 +384,8 @@ int faccessat(int dirfd, const char *p, int m, int fl) {
     if (fk_is_abs(p)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, p); return CALL(faccessat, dirfd, b, m, fl); }
     return CALL(faccessat, dirfd, p, m, fl);
 }
+
+/* (uname() tak perlu dibohongi: §42 menangani io_uring di hulu.) */
 
 /* ---- loader re-exec (binary dinamis ber-interp mentah) ---- */
 static const char *fk_loader_path(void) {

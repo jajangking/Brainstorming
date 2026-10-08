@@ -990,6 +990,14 @@ static void handle(int listener, const struct seccomp_notif *req) {
             else { snprintf(hc, sizeof hc, "%s/%s", base, pbuf); hp = hc; }
             shebang_wrap(hp);
         }
+        /* TODO §43 (device 2026-10-08): redirect loader transparan. Biner
+         * dinamis ber-INTERP stock (mis. hasil apk add/unduhan, dirujuk
+         * kernel host yg tak punya /lib) yang dieksekusi DARI parent
+         * statis (tak ada re-exec shim) mati ENOENT di sini. Solusi:
+         * deteksi ELF+INTERP stock lalu tulis wrapper skrip sekali-pakai
+         * `exec -a $0 LOADER REAL "$@"` (mirip shebang_wrap, tapi tanpa
+         * rename sehingga upgrade apk tak basi). Hari ini: jalankan ulang
+         * bootstrap.sh (rewrite INTERP, idempoten) — lihat README. */
         /* path RELATIF tak berubah: tak ada yang perlu di-rewrite di memori
          * child (lagi pula string bisa di .rodata) -> langsung CONTINUE. */
         if (!changed) {
