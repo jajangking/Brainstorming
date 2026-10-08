@@ -434,3 +434,31 @@ ketemu lewat brief saya.
 Tidak ada tugas baru. Bila muncul sesuatu saat pemakaian sehari-hari, laporkan
 dengan format ronde 11 (error mentah → reproduksi → kontrol A/B → kandidat
 perbaikan) dan ronde berikutnya akan dibuka di bawah bagian ini.
+
+---
+
+# RONDE 14 — laporan Hermes Anda membongkar bug shim (bukan cuma lingkungan)
+
+Terima kasih sudah tetap melapor meski sudah saya tutup. Rekomendasi Anda
+"jangan fix Hermes" saya setujui, tapi **sebagian kesimpulan "ini murni
+environmental collision" tidak tepat** — gejala `uname` kosong itu bug kami:
+
+`fk_sigsys()` menjawab semua syscall terblokir dgn **EPERM**. Android memblokir
+`faccessat2`; libc hanya jatuh ke jalur lama bila jawabannya **ENOSYS**. Dengan
+EPERM, `access()` gagal → PATH-search bash gagal → `type uname` kosong →
+`$(uname -s)` kosong → "unsupported platform: ". Sudah diperbaiki (HANDOFF §34),
+dibuktikan di sandbox dgn harness seccomp.
+
+**Tugas:**
+1. `git pull && ./install.sh`.
+2. **Regresi dulu**: `./selftest` (0 FAIL?) + `alpine` → `opencode` (TUI render?).
+3. Uji ulang gejala Hermes **dgn shim** (tanpa `env -u LD_PRELOAD`):
+   - `alpine -c 'uname -s; type uname; echo "[$(uname -s)]"'` → harapkan
+     ketiganya terisi (dulu `$(uname -s)` kosong).
+   - `alpine -c 'bash /path/hermes-install.sh'` → apakah `unsupported platform:`
+     dan `Bad system call` hilang? (Deteksi Termux kemungkinan tetap memblok —
+     itu kebijakan installer, bukan bug kita; cukup laporkan pesannya.)
+4. Bila masih ada `Bad system call`, lampirkan `strace -f` baris SIGSYS +
+   nomor syscall-nya (`si_syscall`) — kami perlu tahu syscall mana lagi.
+5. Catat juga bila ada perilaku yang BERUBAH gara-gara ENOSYS (mis. program yang
+   dulu "jalan" karena EPERM) — itu risiko yang saya terima sadar.

@@ -1884,3 +1884,57 @@ pada simlink (ELOOP, batas arsitektural ADDFD); `pwd` logis `/root`
 `realpath` namespace (§27) → `getcwd` namespace (§28) → env basi pada nested
 (§30) → default port kembar (§32). Dua di antaranya (§28, §30) hanya ketemu
 karena device menguji **di luar brief** — pelajaran metodologis di §31.3.
+
+## 34. Temuan Hermes — BUKAN sekadar tabrakan lingkungan: bug `fk_sigsys` (-EPERM)
+
+`device-feedback/hermes-test-in-wadah.md`: installer pihak ketiga (Hermes Agent,
+`curl | bash`) gagal di dalam wadah dgn shim: `unsupported platform: ` (kosong)
+lalu `Bad system call` (SIGSYS). Device menyimpulkan ini "environmental
+collision, jangan fix Hermes" dan menyarankan dokumentasi + `env -u LD_PRELOAD`.
+
+**Saran dokumentasinya saya tolak sebagian: ada bug nyata di shim kami.**
+
+### 34.1 Akar masalah
+
+`fk_sigsys()` menjawab **semua** syscall terblokir yang tak dikenal dengan
+`-EPERM`. Itu salah. libc (musl & glibc) memakai **`ENOSYS`** sebagai sinyal
+"kernel ini belum punya syscall tersebut" untuk jatuh ke jalur lama; `EPERM`
+justru diteruskan apa adanya ke pemanggil sebagai kegagalan nyata.
+
+Android memblokir `faccessat2`. Rantainya:
+
+```
+faccessat2 diblokir -> SIGSYS -> shim jawab EPERM
+  -> access() gagal (bukan fallback ke faccessat)
+  -> PATH-search bash gagal: `type uname` kosong
+  -> $(uname -s) kosong
+  -> installer: "unsupported platform: "
+```
+
+Jadi `uname` di prompt normal (device mencatat `uname -s` = `Linux`) tapi kosong
+di dalam script — karena yang rusak bukan `uname`, melainkan **pencarian PATH**
+yang memakai `access()`.
+
+**Bukti sandbox** (harness seccomp mem-blokir `faccessat2`, dua jawaban dibandingkan):
+
+| Jawaban shim | Hasil |
+|---|---|
+| `EPERM` (lama) | `faccessat2 -> EPERM`; **tak ada fallback** → libc lapor gagal ke script |
+| `ENOSYS` (baru) | `faccessat2 -> ENOSYS` → **libc jatuh ke `faccessat`** → `access()` berhasil |
+
+### 34.2 FIX
+
+`fk_sigsys()` default kini `-ENOSYS` (keluarga `setgid/setuid/...` tetap
+dijawab "sukses" demi fake-root). Satu baris, tapi memperbaiki **seluruh kelas**
+bug: setiap syscall baru yang diblokir Android (`faccessat2`, dan kelak lainnya)
+kini memicu fallback libc alih-alih mematikan tooling.
+
+### 34.3 Yang tetap benar dari analisis device
+
+- Deteksi Termux di installer Hermes (`PREFIX`/`TERMUX_VERSION`) **bukan urusan
+  kita** — itu kebijakan installer, tetap perlu override env bila mau dipasang.
+- Proses **tanpa shim** (biner statis) tetap bisa wafat `Bad system call`: handler
+  kita hanya hidup bila `libfakeroot.so` ter-load. Untuk itu jalurnya **svsp**
+  (supervisor menangani di level syscall), bukan ldpreload.
+- Saran `env -u LD_PRELOAD` tetap valid sebagai jalan pintas, tapi kini bukan
+  satu-satunya jalan untuk kasus `access()`.

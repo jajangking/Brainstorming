@@ -69,7 +69,16 @@ static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {
         uc->uc_mcontext.regs[0] = 0;                 /* sukses */
         break;
     default:
-        uc->uc_mcontext.regs[0] = (unsigned long)-1; /* -EPERM */
+        /* §34: syscall terblokir yang TIDAK kita kenal harus dijawab
+         * -ENOSYS, bukan -EPERM. libc (musl/glibc) memakai ENOSYS sebagai
+         * sinyal "kernel ini belum punya syscall itu" lalu jatuh ke jalur
+         * lama; EPERM justru diteruskan ke pemanggil sebagai kegagalan
+         * nyata. Contoh di perangkat: Android memblokir faccessat2, shim
+         * menjawab EPERM -> access() gagal -> `type uname`/PATH-search di
+         * bash kosong -> script pihak ketiga melihat `uname -s` kosong
+         * (device: installer Hermes "unsupported platform: ").
+         * Catatan: SYS_setgid dkk di atas tetap "sukses" (fake-root). */
+        uc->uc_mcontext.regs[0] = (unsigned long)-ENOSYS;
         break;
     }
 }
