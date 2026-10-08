@@ -28,6 +28,18 @@ if [ ! -x "$FR" ]; then
     exit 1
 fi
 
+# Default port opencode wadah (lihat bootstrap.sh §32): opencode wadah DAN
+# opencode host sama-sama default ke port service 49374 -> bentrok bila
+# keduanya jalan. setup_opencode_port di bootstrap hanya kepicu bila opencode
+# SUDAH ada saat bootstrap; opencode yang dipasang belakangan (kasus umum
+# pasca-install-fresh, temuan device 2026-10-08) lolos dari sana. Maka
+# pastikan di sini, tiap kali masuk wadah. Idempoten: hanya DIBUAT bila
+# opencode ada tapi config belum ada (tak pernah menimpa pilihan user).
+if [ -x "$BASE/root/.opencode/bin/opencode" ] && [ ! -e "$BASE/root/.config/opencode/service.json" ]; then
+    mkdir -p "$BASE/root/.config/opencode" 2>/dev/null || true
+    printf '{ "port": 49474 }\n' > "$BASE/root/.config/opencode/service.json" 2>/dev/null || true
+fi
+
 # Masuk shell atau jalankan command
 if [ $# -eq 0 ]; then
     # Shell interaktif. Mendarat di /root wadah (= $HOME) supaya prompt

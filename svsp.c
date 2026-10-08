@@ -1240,7 +1240,13 @@ int main(int argc, char **argv) {
     setenv("USER", "root", 1); setenv("LOGNAME", "root", 1);
     setenv("SHELL", "/bin/sh", 1);
     setenv("FAKE_BASE", base, 1);
-    unsetenv("LD_PRELOAD"); unsetenv("LD_LIBRARY_PATH"); unsetenv("LD_PRELOAD_32");
+    unsetenv("LD_LIBRARY_PATH"); unsetenv("LD_PRELOAD_32");
+    /* §40: LD_PRELOAD dari pemanggil DIPERTAHANKAN (dulu di-unset di sini).
+     * Supervised dynamic butuh shim: handler SIGSYS in-process (fk_sigsys)
+     * untuk trap seccomp Android yg tiba sebelum notif svsp (faccessat2,
+     * openat2 — HANDOFF §6.1). fake-run menyetelnya ke shim; bila tak ada
+     * (pemanggilan langsung), perilaku lama tak berubah. Biner statis
+     * mengabaikan LD_PRELOAD. */
 
     struct sock_filter *f; __u16 flen;
     build_filter(&f, &flen);

@@ -174,10 +174,20 @@ if [ "$MODE" = svsp ]; then
     else
         tgt+=("$host")
     fi
+    # §40: supervised dynamic WAJIB memuat shim. Trap seccomp Android
+    # (faccessat2, openat2 — RET_TRAP) tiba SEBELUM notif svsp (HANDOFF
+    # §6.1; device 2026-10-08: bash di --svsp mati SIGSYS saat PATH-lookup
+    # karena svsp tak pernah menerima notif faccessat2) sehingga svsp tak
+    # bisa menanganinya. Handler SIGSYS in-process milik shim (fk_sigsys,
+    # §34/§35 libfakeroot) menangkap & menjawab ENOSYS -> fallback libc
+    # (faccessat) jalan. Biner statis mengabaikan LD_PRELOAD (tak efek).
+    ldp=()
+    [ -e "$SHIM" ] && ldp=("LD_PRELOAD=$SHIM")
     exec env -i \
       FAKE_BASE="$HOME_BASE" \
       PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
       LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
+      ${ldp[@]+"${ldp[@]}"} \
       HOME="$HOME_BASE/root" \
       TMPDIR="$HOME_BASE/tmp" \
       PWD="$(pwd)" \

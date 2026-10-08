@@ -16,7 +16,13 @@
 #   5. passthrough /dev /proc /sys (symlink host, set yang terbukti).
 #   6. build libfakeroot.so (shim SIGSYS+rewrite path) + svsp (supervisor USER_NOTIF).
 #   7. pasang fake-run + svsp ke $prefix/bin, shim ke ~/libfakeroot.so.
-#   8. verifikasi: dinamis (LD_PRELOAD), supervisor (--svsp), STATIS, isolasi ENOENT.
+#   8. runtime C/C++ (libstdc++ + libgcc) via apk wadah — minirootfs TIDAK
+#      menyertakannya, padahal binary pihak-ketiga (mis. opencode) butuh
+#      libstdc++.so.6 (temuan device pasca-install-fresh 2026-10-08).
+#   9. paket dasar (curl, bash, git) via apk wadah — peralatan standar
+#      yang diharapkan selalu ada di setiap wadah.
+#  10. verifikasi: dinamis (LD_PRELOAD), supervisor (--svsp), STATIS,
+#      isolasi ENOENT, runtime C++ (libstdc++).
 #
 # Hasil akhir: `fake-run <program>` universal — dinamis cepat, statis otomatis
 # lewat supervisor; tanpa root, tanpa proot, native speed.
@@ -181,6 +187,44 @@ setup_dns() {
     log "resolv.conf wadah: 4 nameserver + retry musl (timeout:2 attempts:3)"
 }
 
+# ------------------------------------------------------- runtime libs C/C++
+# minirootfs TIDAK menyertakan libstdc++/libgcc, padahal banyak binary
+# pihak-ketiga (mis. opencode, bun) butuh libstdc++.so.6. Pasang dari awal
+# supaya "fresh install" langsung bisa jalanin binary C++ (temuan device
+# pasca-install-fresh 2026-10-08: opencode gagal start dengan
+# `Error loading shared library libstdc++.so.6`).
+# Syarat: dipanggil SETELAH install() — fake-run butuh shim yang sudah
+# terpasang ($HOME/libfakeroot.so) untuk jalur LD_PRELOAD apk.
+runtime_libs() {
+    if [ -f "$BASE/usr/lib/libstdc++.so.6" ] && [ -f "$BASE/usr/lib/libgcc_s.so.1" ]; then
+        log "runtime libstdc++/libgcc sudah ada — dipakai ulang"; return 0
+    fi
+    [ -x "$PREFIX/bin/fake-run" ] || die "fake-run belum terpasang (runtime_libs dipanggil sebelum install?)"
+    log "pasang runtime C++ (libstdc++ + libgcc) via apk wadah..."
+    env -u LD_PRELOAD "$PREFIX/bin/fake-run" --base="$BASE" apk add libstdc++ libgcc \
+        || die "apk add libstdc++ libgcc gagal"
+}
+
+# ------------------------------------------------------- paket dasar wadah
+# Peralatan standar yang diharapkan ada di setiap wadah: curl (unduh),
+# bash (shell skrip umum — bawaan wadah hanya busybox ash), git (klon repo
+# & tooling). Dipasang via apk wadah, idempoten.
+# Syarat: dipanggil SETELAH install() (butuh fake-run + shim), sama
+# seperti runtime_libs.
+base_packages() {
+    local missing=0 p
+    for p in curl bash git; do
+        [ -x "$BASE/usr/bin/$p" ] || [ -x "$BASE/bin/$p" ] || missing=1
+    done
+    if [ "$missing" -eq 0 ]; then
+        log "paket dasar (curl bash git) sudah ada — dipakai ulang"; return 0
+    fi
+    [ -x "$PREFIX/bin/fake-run" ] || die "fake-run belum terpasang (base_packages dipanggil sebelum install?)"
+    log "pasang paket dasar (curl bash git) via apk wadah..."
+    env -u LD_PRELOAD "$PREFIX/bin/fake-run" --base="$BASE" apk add curl bash git \
+        || die "apk add curl bash git gagal"
+}
+
 # ------------------------------------------------- symlink applet busybox
 # minirootfs Alpine: bin/cat -> /bin/busybox (ABSOLUT). Dari sisi HOST ini
 # patah (host /bin tak ada busybox) dan fake-run tak bisa resolve. Wajib
@@ -236,7 +280,12 @@ rewrite_interp() {
     done < <(find "$BASE" \
         \( -type d \( -name .git -o -name node_modules -o -name __pycache__ \
                      -o -name .venv -o -name .cache \) -prune \) -o \
-        \( -type f -size +64c -size -64M -print \))
+        \( -type f -size +64c -size -512M -print \))
+    # Batas atas 512M (bukan 64M): binary modern bisa jumbo (device
+    # 2026-10-08: opencode 195MB lolos dari rewrite -> INTERP stock
+    # /lib/... -> kernel host tak bisa resolve -> --svsp ENOENT, padahal
+    # jalur shim jalan karena fake-run bypass INTERP). Pra-saring magic
+    # ELF 4-byte membuat sapuan file besar tetap murah.
     log "PT_INTERP di-set: $n file${fail:+, $fail gagal}"
     [ "$fail" -eq 0 ] || die "ada file ELF yang gagal di-rewrite"
 }
@@ -325,6 +374,11 @@ EOF
 
     echo "----- V4 isolasi (harus ENOENT) -----"
     env -u LD_PRELOAD "$fr" --base="$base" cat /system/build.prop || true
+
+    echo "----- V5 runtime C++ (libstdc++) -----"
+    [ -f "$base/usr/lib/libstdc++.so.6" ] \
+        || die "libstdc++.so.6 tak ada di wadah — runtime_libs gagal?"
+    echo "libstdc++.so.6 OK"
 }
 
 # ------------------------------------------------- default port opencode
@@ -357,6 +411,8 @@ fix_applet_links
 rewrite_interp
 build_binaries
 install
+runtime_libs
+base_packages
 setup_opencode_port
 verify_run
 

@@ -19,12 +19,14 @@
 set -euo pipefail
 
 # ========== Warna ==========
-RED='\033[1;31m'
-GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[1;34m'
-CYAN='\033[1;36m'
-NC='\033[0m'
+# ESC asli ($'...'), bukan teks literal \033 — agar berlaku baik di printf
+# MAUPUN di heredoc `cat << EOF` (cat tidak meng-interpret escape \033).
+RED=$'\033[1;31m'
+GREEN=$'\033[1;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[1;34m'
+CYAN=$'\033[1;36m'
+NC=$'\033[0m'
 
 log()  { printf "${GREEN}[✓] %s${NC}\n" "$*"; }
 warn() { printf "${YELLOW}[!] %s${NC}\n" "$*"; }
@@ -146,6 +148,18 @@ if [ ! -f "$BASE/lib/ld-musl-patched.so.1" ]; then
     die "Loader patched tidak ada"
 fi
 log "Loader patched OK"
+
+if [ ! -f "$BASE/usr/lib/libstdc++.so.6" ]; then
+    die "libstdc++.so.6 tidak ada di wadah (runtime_libs bootstrap gagal?)"
+fi
+log "libstdc++ runtime OK"
+
+for p in curl bash git; do
+    if [ ! -x "$BASE/usr/bin/$p" ] && [ ! -x "$BASE/bin/$p" ]; then
+        die "$p tidak ada di wadah (base_packages bootstrap gagal?)"
+    fi
+done
+log "paket dasar OK (curl bash git)"
 
 # Quick test
 info "Quick test..."
