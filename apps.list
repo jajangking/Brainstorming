@@ -1,0 +1,17 @@
+# apps.list — registry aplikasi untuk launcher `apps`
+# Format: NAMA | IKON | TAGLINE | PATH-DETEK | PERINTAH-JALANKAN
+#
+# - Path berawalan "B:" = relatif ke base wadah ($HOME/alpine-rootfs).
+# - Path tanpa "B:" dicek di host dulu, lalu di dalam base.
+# - Yang tidak terdeteksi tampil redup "belum terpasang" dan tak bisa dijalankan.
+# - Kolom terakhir dijalankan lewat `eval` dari $PREFIX/apps (atau repo).
+
+SHELL | SH | Shell Alpine di dalam wadah | B:bin/sh | fake-run --base="$BASE" /bin/sh -l
+
+OPENCODE | OC | OpenCode — agen kode TUI | B:root/.opencode/bin/opencode | fake-run --base="$BASE" /root/.opencode/bin/opencode
+
+HERMES | HR | Hermes Agent — CLI agen (Nous) | B:root/.local/bin/hermes | fake-run --base="$BASE" /bin/sh -lc "export PATH=$PATH:/root/.hermes/hermes-agent/.hermes/bin; exec hermes"
+
+CLAUDE | AI | Claude Code — agen terminal | B:root/.claude/local/claude | fake-run --base="$BASE" /root/.claude/local/claude
+
+APKMGR | PK | Package manager Alpine (apk) | B:sbin/apk | fake-run --base="$BASE" /sbin/apk

@@ -328,8 +328,16 @@ install() {
         cp "$SRC/alpine" "$PREFIX/bin/alpine"
         chmod 0755 "$PREFIX/bin/alpine"
     fi
+    # launcher aplikasi: grid TUI + registry (opsional, tak ganggu bila absen)
+    if [ -f "$SRC/apps" ] && [ -f "$SRC/apps.list" ]; then
+        cp "$SRC/apps" "$PREFIX/bin/apps"
+        chmod 0755 "$PREFIX/bin/apps"
+        mkdir -p "$PREFIX/share/brainstorming"
+        cp "$SRC/apps.list" "$PREFIX/share/brainstorming/apps.list"
+    fi
     chmod 0755 "$HOME/libfakeroot.so"
     log "terpasang: $PREFIX/bin/fake-run, $PREFIX/bin/svsp, $PREFIX/bin/alpine, ~/libfakeroot.so"
+    [ -f "$PREFIX/bin/apps" ] && log "launcher: $PREFIX/bin/apps (daftar: $PREFIX/share/brainstorming/apps.list)"
 }
 
 # ------------------------------------------------------------- verifikasi

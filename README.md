@@ -85,6 +85,22 @@ alpine
 /root/.opencode/bin/opencode          # TUI, config terisolasi di root/.config/opencode
 ```
 
+## 🧲 Launcher aplikasi (`apps`)
+
+Grid TUI untuk aplikasi di dalam wadah — sepetik launcher, tapi di terminal:
+
+```bash
+apps                # buka launcher (grid ikon)
+apps --list         # daftar plainly (log/CI)
+apps OPENCODE       # jalankan langsung tanpa UI
+```
+
+Kontrol: `↑ ↓ ← →` pindah · `Enter` jalan · `Tab` berikutnya · `r` pindai ulang · `q` keluar ·
+ketik apa saja untuk filter (case-insensitive).
+
+App terdaftar di `apps.list` (format `NAMA | IKON | TAGLINE | PATH-DETEK | CMD`); yang
+belum terpasang tampil redup dan tak bisa dijalankan. Tambah app baru = tambah 1 baris.
+
 ## 📁 Path Penting
 
 | Apa | Path |
