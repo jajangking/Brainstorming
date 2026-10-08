@@ -204,7 +204,11 @@ karena itu `alpine` (shell) lebih murah untuk kerja beruntun.
 ## ⚠️ Limitasi (Bukan Bug)
 
 - `chroot`/`mount`/namespace sungguhan → **permanen mustahil** (seccomp AND-min)
-- glibc (apt/Debian) → repo ini musl-only; butuh `proot-distro`
+- **glibc (apt/Debian, binary glibc) → mustahil di wadah fake-chroot ini.**
+  Semua proses glibc memanggil `set_robust_list()` saat init TLS, dan Android
+  membunuhnya secara *non-deliverable* (tidak bisa ditangkap handler; `gcompat`
+  juga tak cukup — simbol regex/mallopt hilang). Butuh glibc → `proot-distro`.
+  Bukti & percobaan: `device-feedback/ronde20.md`
 - `openat2` → seccomp eksternal Android SIGSYS-kill sebelum supervisor
 - `faccessat2`/`io_uring_setup` → trap Android SEBELUM notif svsp; ditangani
   handler SIGSYS in-process milik shim (§34/§35, §42: io_uring dijawab fd

@@ -1426,7 +1426,12 @@ int main(int argc, char **argv) {
     setenv("USER", "root", 1); setenv("LOGNAME", "root", 1);
     setenv("SHELL", "/bin/sh", 1);
     setenv("FAKE_BASE", base, 1);
-    unsetenv("LD_LIBRARY_PATH"); unsetenv("LD_PRELOAD_32");
+    unsetenv("LD_PRELOAD_32");
+    /* §45: LD_LIBRARY_PATH dari pemanggil DIPERTAHANKAN. Fake-run
+     * menyetelnya ke <base>/lib:<base>/usr/lib — itu yang membuat biner
+     * glibc (mis. loader+libc dari Debian di <base>/opt/glibc) bisa
+     * mencari libc.so.6 yang benar; tanpa ini glibc jatuh ke /lib/ musl/
+     * gcompat -> "no version information available". */
     /* §40: LD_PRELOAD dari pemanggil DIPERTAHANKAN (dulu di-unset di sini).
      * Supervised dynamic butuh shim: handler SIGSYS in-process (fk_sigsys)
      * untuk trap seccomp Android yg tiba sebelum notif svsp (faccessat2,
