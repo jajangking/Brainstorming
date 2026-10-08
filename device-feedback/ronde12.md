@@ -113,3 +113,23 @@ program yang benar.
 | Nested dua tingkat + nilai konsisten | ✅ TUI render; exe=program asli walau env basi (bukti prioritas §30) |
 | Regresi selftest | ✅ 0 FAIL |
 | Regresi matriks kasus 3 & 4 svsp+shim | ✅ 4/4 |
+
+## 8. Insiden pasca-ronde 12 (pemakaian user, dilaporkan utk kronologi)
+
+User menempel error baru: `Managed service port 49374 ... already in use`.
+Ini **bukan bug shim** — justru bukti fix §30 bekerja: anak spawn kini hidup
+sampai tahap bind port (dulu mati di `can't open 'serve'`). Penyebabnya konflik
+lingkungan yang terdokumentasi sejak ronde 5: **49374 = service host opencode
+(pid 6486, sesi agent ini), sementara config wadah selalu saya kembalikan ke
+49374** setelah tiap uji → pemakaian default user pasti bentrok.
+
+Tindakan lingkungan (bukan kode):
+
+- `opencode service set port 49474` untuk wadah → **baseline permanen baru**:
+  jalur user (`alpine` → `opencode`) diverifikasi TUI render, daemon hidup di
+  49474 (HTTP 200), host 49374 utuh (401).
+- **Protokol ronde berikutnya:** uji spawn tetap port 49474 (kini baseline,
+  langkah "restore 49374" DIBATALKAN — mengembalikannya justru mengulang insiden).
+- Catatan utk Arena (opsional): wadah & host opencode sama-sama default 49374 —
+  di perangkat tempat host service berjalan, default wadah pasti bentrok;
+  pertimbangkan default port berbeda saat bootstrap.
