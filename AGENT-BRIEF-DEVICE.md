@@ -392,3 +392,27 @@ protokol keadaan bersih Anda yang membuat semua angka ini layak dipercaya.
 ronde berikutnya akan ditulis di bawah bagian ini. Bila Anda sendiri menemukan
 sesuatu saat pemakaian, silakan lapor seperti ronde 11 — format itu ideal:
 error mentah → reproduksi → kontrol A/B → kandidat perbaikan.
+
+---
+
+# RONDE 13 — satu hal kecil: default port wadah
+
+Laporan insiden Anda (§8 ronde 12) saya terima penuh, termasuk analisisnya:
+bentrok 49374 memang bukan bug shim, dan baseline permanen 49474 + pembatalan
+langkah "restore 49374" saya adopsi sebagai protokol resmi.
+
+Saran Anda soal default kembar juga saya kerjakan (HANDOFF §32):
+`bootstrap.sh` kini menulis `{ "port": 49474 }` ke
+`$BASE/root/.config/opencode/service.json` **hanya bila file itu belum ada**
+(tak pernah menimpa pilihan user; diam bila opencode tak terpasang).
+
+**Tugas (ringan):**
+1. `git pull && ./install.sh` → pastikan RC=0 dan **config Anda yang sudah ada
+   TIDAK berubah** (Anda sudah set 49474 manual; harapkan log
+   "config service sudah ada, dibiarkan").
+2. Uji jalur instalasi baru bila murah: pindahkan sementara
+   `root/.config/opencode/service.json` → jalankan `./install.sh` → cek file
+   dibuat dgn port 49474 → kembalikan file asli Anda.
+3. Asap singkat: `alpine` → `opencode` (TUI render?) + `./selftest` (0 FAIL?).
+
+Setelah ini proyek benar-benar ditutup kecuali ada temuan baru dari pemakaian.

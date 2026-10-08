@@ -1821,3 +1821,30 @@ Matriks "12/12" sempat memberi rasa aman palsu: semua tes meluncurkan biner
 mengetik perintah**. Bug §30 hidup persis di celah itu dan hanya ketahuan
 karena device menguji di luar brief. Brief berikutnya harus selalu memuat
 minimal satu jalur "pemakaian manusia", bukan hanya pemanggilan terprogram.
+
+## 32. Insiden pasca-penutupan — bentrok port default 49374 (kode: diperbaiki)
+
+`device-feedback/ronde12.md §8`: user memakai wadah secara normal lalu kena
+`Managed service port 49374 ... already in use`. Device menganalisis dengan
+benar bahwa ini **bukan bug shim** — justru bukti §30 bekerja (anak kini hidup
+sampai tahap bind port; dulu mati lebih awal di `can't open 'serve'`).
+
+Akarnya **default kembar**: opencode wadah dan opencode host sama-sama memakai
+port service 49374. Di perangkat yang juga menjalankan opencode di host
+(kasus device ini, pid 6486), pemakaian wadah apa adanya **pasti** bentrok —
+dan selama ronde 5–12 kondisi itu tertutup karena device selalu memindah port
+ke 49474 saat uji lalu mengembalikannya ke 49374.
+
+**FIX §32 (`bootstrap.sh setup_opencode_port`)**: saat bootstrap, bila opencode
+terpasang di wadah dan **belum** punya `root/.config/opencode/service.json`,
+tulis default `{ "port": 49474 }`. Konservatif & idempoten:
+
+| Kondisi | Perilaku (diuji sandbox) |
+|---|---|
+| config belum ada | dibuat `{"port":49474}` + log |
+| config sudah ada (mis. pilihan user, ada password) | **tidak disentuh**, hanya log |
+| opencode tak terpasang di wadah | diam, tak membuat apa pun |
+
+Catatan: ini hanya menolong instalasi baru. Device sudah menetapkan 49474
+sebagai baseline permanen di perangkatnya (dan membatalkan langkah "restore
+49374" — mengembalikannya justru mengulang insiden); keputusan itu saya adopsi.

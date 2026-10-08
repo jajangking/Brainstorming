@@ -317,6 +317,27 @@ EOF
     env -u LD_PRELOAD "$fr" --base="$base" cat /system/build.prop || true
 }
 
+# ------------------------------------------------- default port opencode
+# §32 (insiden device pasca-ronde 12): opencode wadah DAN opencode host
+# sama-sama default ke port service 49374. Di perangkat yang juga menjalankan
+# opencode di host, pemakaian wadah apa adanya pasti kena
+# "Managed service port 49374 ... already in use". Beri wadah default sendiri.
+# Konservatif: hanya DIBUAT bila belum ada config (tak pernah menimpa pilihan
+# user), dan hanya bila opencode memang terpasang di wadah.
+setup_opencode_port() {
+    local oc="$BASE/root/.opencode/bin/opencode"
+    local cfgdir="$BASE/root/.config/opencode"
+    local cfg="$cfgdir/service.json"
+    [ -x "$oc" ] || return 0
+    if [ -e "$cfg" ]; then
+        log "opencode: config service sudah ada, dibiarkan ($cfg)"
+        return 0
+    fi
+    mkdir -p "$cfgdir" || return 0
+    printf '{ "port": 49474 }\n' > "$cfg" || return 0
+    log "opencode: default port wadah di-set 49474 (hindari bentrok 49374 milik host)"
+}
+
 # =================================================================== main
 provision_rootfs
 musl_dev
@@ -326,6 +347,7 @@ fix_applet_links
 rewrite_interp
 build_binaries
 install
+setup_opencode_port
 verify_run
 
 echo
