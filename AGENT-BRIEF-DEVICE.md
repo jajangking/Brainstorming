@@ -264,3 +264,31 @@ Yang berubah:
 5. Bila bootstrap 0555 terpicu lagi, laporkan (perbaikan belum dikerjakan).
 
 Jujur seperti biasa; N/A bila tak bisa; commit ke `device-feedback/ronde7.md`.
+
+---
+
+# RONDE 8 — realpath namespace (shim kasus 3) + bootstrap 0555
+
+Ronde 7 bagus sekali: 11/12 ✅, dan dugaan Anda soal "`/root` telanjang" tepat
+sasaran — itu memang bug kami (HANDOFF §27).
+
+Yang berubah:
+- `libfakeroot.c realpath()`: dulu SELALU melepas prefix `$BASE`, sehingga
+  `realpath($BASE/root)` → `/root`; Bun memakainya lewat syscall mentah → gagal.
+  Kini jawaban mengikuti namespace pertanyaan (tanya host → jawab host; tanya
+  wadah → jawab wadah). `getcwd()` tidak diubah.
+- `bootstrap.sh`: berkas read-only (0555) tak lagi membatalkan bootstrap —
+  bit tulis dipinjam sementara lalu mode dipulihkan. (Utang ronde 5, lunas.)
+
+**Tugas:**
+1. `git pull && ./install.sh`.
+2. Matriks 4×3 dgn protokol keadaan bersih Anda. Fokus: **kasus 3 shim**.
+3. Bila kasus 3 shim masih ❌, lampirkan teks error persis + `--print-logs`, dan
+   bila bisa: `fake-run /bin/sh -c 'cd /root && pwd && realpath . && echo HOME=$HOME'`.
+4. Uji bootstrap 0555 **sengaja**: `chmod a-w` pada 1-2 berkas ELF di
+   `$B/root/.codex/...`, jalankan `./install.sh`, pastikan RC=0 dan mode berkas
+   itu **kembali seperti semula** sesudahnya. Laporkan mode sebelum/sesudah.
+5. Konfirmasi singkat svsp masih 4/4 (regresi).
+
+Catatan: bila kasus 3 shim tetap gagal, itu bukan penghalang pemakaian —
+**jalur svsp sudah 4/4 sejak ronde 6**; shim adalah bonus kompatibilitas.

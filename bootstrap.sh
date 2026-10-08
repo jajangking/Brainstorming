@@ -205,6 +205,18 @@ rewrite_interp() {
     local n=0 fail=0 f rc
     while IFS= read -r f; do
         rc=0; "$TMPW/pinterp" "$f" "$BASE/lib/ld-musl-patched.so.1" || rc=$?
+        # §27: berkas paket kerap ber-mode read-only (0555, mis. isi .codex) —
+        # pinterp lalu gagal EACCES dan dulu MEMBATALKAN seluruh bootstrap
+        # (device ronde 5). Pinjam bit tulis sebentar, ulangi, lalu PULIHKAN
+        # mode semula.
+        if [ "$rc" = 2 ] && [ -e "$f" ] && [ ! -w "$f" ]; then
+            m=$(stat -c '%a' "$f" 2>/dev/null || echo "")
+            if [ -n "$m" ] && chmod u+w "$f" 2>/dev/null; then
+                rc=0; "$TMPW/pinterp" "$f" "$BASE/lib/ld-musl-patched.so.1" || rc=$?
+                chmod "$m" "$f" 2>/dev/null || true
+                [ "$rc" = 0 ] && log "  (mode $m dipinjam sementara: $f)"
+            fi
+        fi
         case $rc in
             0) n=$((n+1)) ;;
             1) : ;;                          # bukan ELF64 / tanpa INTERP — skip

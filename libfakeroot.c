@@ -1014,8 +1014,21 @@ char *realpath(const char *p, char *out) {
         char *r = CALL(realpath, b, out);
         if (r) {
             size_t bl = strlen(fk_base);
-            if (strncmp(r, fk_base, bl) == 0 && (r[bl] == '/' || r[bl] == '\0'))
+            /* §27: JAWAB DI NAMESPACE YANG DITANYAKAN.
+             * Dulu prefix base selalu dilepas, jadi realpath("$BASE/root")
+             * -> "/root". Pemanggil yang memberi path HOST (mis. HOME dari
+             * fake-run) lalu memakai hasilnya lewat SYSCALL MENTAH (Zig/Bun
+             * tak lewat libc) -> path wadah tak dikenal kernel ->
+             * "LocationNotFoundError: Location not found: /root" (device
+             * ronde 7, kasus 3 shim). Kini: hanya lepas prefix bila pemanggil
+             * memang bertanya dgn path wadah. */
+            int asked_host = (strncmp(p, fk_base, bl) == 0 &&
+                              (p[bl] == '/' || p[bl] == '\0'));
+            if (!asked_host &&
+                strncmp(r, fk_base, bl) == 0 && (r[bl] == '/' || r[bl] == '\0')) {
                 memmove(r, r + bl, strlen(r + bl) + 1);   /* tampilkan /etc, bukan /data/... */
+                if (r[0] == '\0') { r[0] = '/'; r[1] = '\0'; }
+            }
         }
         return r;
     }

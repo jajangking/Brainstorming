@@ -1582,3 +1582,46 @@ jawabannya adalah "pakai jalur svsp" (sudah 4/4 ✅), bukan menambah tambalan sh
   — persis catatan kosmetik device.
 - **bootstrap.sh 0555 masih belum diperbaiki** (ronde 5 §1). Tidak terpicu di ronde 6
   hanya karena `chmod u+w` ronde 5 persisten. Tetap di antrean.
+
+## 27. RONDE 7 — shim tinggal 1 bug; realpath namespace + utang bootstrap dibayar
+
+`device-feedback/ronde7.md` (basis `b9d1cdb`): **11/12 ✅**. Terverifikasi di
+perangkat: `FAKEROOT_EXE` ter-set (env anak & env daemon), jaring pengaman spawn
+bekerja (`command=` kini **program asli**, `cannot load serve` HILANG, kasus 4 shim
+✅), `O_PATH` mode-000 OK, DBG `errno=0` (tak basi lagi), simlink O_NOFOLLOW tetap
+ELOOP sesuai ekspektasi. svsp tetap 4/4 ✅.
+
+### 27.1 Sisa: shim kasus 3 — `LocationNotFoundError: Location not found: /root`
+
+Device menunjukkan server anak **sehat** (daemon cmdline = program asli, HOME &
+`FAKEROOT_EXE` benar, port 200) tapi **klien TUI** mati. Dugaan device ("ada
+terjemahan path yang menghasilkan `/root` telanjang") **tepat**; sumbernya
+ketemu di `libfakeroot.c`:
+
+`realpath()` dulu **selalu** melepas prefix `$BASE` dari hasil. Maka
+`realpath("$BASE/root")` — dan `HOME` memang di-set `fake-run` ke path HOST —
+mengembalikan `/root`. Klien Bun lalu memakai hasil itu lewat **syscall mentah**
+(Zig tak lewat libc, jadi tak ter-interposisi) → kernel host tak kenal `/root`
+→ `LocationNotFoundError`. Jalur natif tak terkena (tanpa shim, tanpa strip);
+svsp tak terkena (path wadah memang sah di sana).
+
+**FIX:** jawab di **namespace yang ditanyakan**. Bila pemanggil bertanya dengan
+path HOST (`$BASE/...`), kembalikan path HOST; hanya bila ia bertanya dengan path
+wadah, prefix dilepas seperti dulu. Ini mempertahankan ilusi fake-chroot untuk
+apk dkk. (tak ada perubahan perilaku untuk input `/etc`, `/`) sekaligus berhenti
+memberi path wadah kepada pemanggil yang jelas-jelas bekerja di namespace host.
+
+Uji sandbox: `realpath($B/root)` → `$B/root` (dulu `/root`); `realpath(/etc)` →
+`/etc`; `realpath(/)` → `/`. `getcwd()` **tidak** diubah (ilusi cwd tetap).
+
+Catatan jujur: ini belum diverifikasi perangkat, dan Bun bisa saja menurunkan
+lokasi dari sumber lain (`$HOME` mentah, `getpwuid`). Bila ronde 8 masih gagal,
+rekomendasi tetap: **pakai jalur svsp** (4/4 ✅ sejak ronde 6).
+
+### 27.2 Utang bootstrap 0555 DIBAYAR
+
+`bootstrap.sh` `rewrite_interp()`: bila `pinterp` gagal I/O (rc=2) karena berkas
+read-only (mis. 52 berkas `.codex` 0555 di ronde 5 yang dulu mematikan seluruh
+bootstrap), kini **pinjam bit tulis sebentar → ulangi → pulihkan mode semula**,
+dan hanya dianggap gagal bila tetap tak bisa. Device tak perlu lagi `chmod u+w`
+manual.
