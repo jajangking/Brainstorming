@@ -2143,3 +2143,56 @@ Uji fungsional: ELF diproses, berkas teks dilewati, `.git` tak disentuh.
 Kegagalan unduh Python = `dns error`/`EAI_AGAIN` saat menarik dari
 `objects.githubusercontent.com`. Device menilai transien; `git fetch` di wadah
 berhasil. Tidak ada tindakan kode.
+
+## 39. RONDE 17 — §38 terverifikasi; batas biner STATIS (uv) terdokumentasi
+
+`device-feedback/ronde17.md` (basis `8f12788`):
+
+| Item | Hasil |
+|---|---|
+| §38.2 `install.sh` dgn `.hermes` tetap di tempat | ✅ **48 detik** (ronde 16: >7 menit/hang), PT_INTERP 28 file, 0 gagal |
+| `selftest` | ✅ 0 FAIL |
+| `alpine` → `opencode` TUI | ✅ render, daemon 49474 HTTP=200 |
+| §38.1 banner loader patched tanpa argumen | ✅ `musl libc (aarch64)` + `Version 1.2.6` (bukan lagi usage BusyBox) |
+| uv auto-deteksi libc tanpa `UV_LIBC` | ❌ tetap gagal — akar **lain** |
+
+### 39.1 Akar kegagalan uv: biner STATIS bocor ke `/bin/sh` host
+
+strace device:
+
+```
+openat("/bin/sh")                                  <- /bin/sh HOST (bionic)
+execve("/system/bin/linker64", [...])              <- linker ANDROID, bukan ld-musl
+```
+
+`readelf -l uv` → **tidak ada PT_INTERP**: uv adalah biner **musl statis**.
+LD_PRELOAD tidak bisa masuk ke biner statis, jadi terjemahan path shim **tidak
+berlaku** padanya; `open("/bin/sh")` miliknya mengenai `/bin/sh` Android.
+Untuk program **dinamis**, device memverifikasi shim menerjemahkan `/bin/sh`
+dengan benar (→ busybox, interp `ld-musl-patched.so.1`).
+
+Jadi urutan koreksi diagnosis sepanjang topik ini: byte-patch loader (SALAH) →
+`fk_fix_loader_argv` (BENAR, tapi hanya untuk banner) → **biner statis** (akar
+sebenarnya untuk uv).
+
+### 39.2 `UV_LIBC=musl` berstatus PERBAIKAN, bukan sabuk pengaman
+
+Karena uv statis tak akan pernah melihat wadah untuk path hardcoded seperti
+`/bin/sh`, `UV_LIBC=musl` di `fake-run` (§37) adalah **satu-satunya jalur yang
+bekerja** — dan nilainya benar secara fakta (wadah ini musl). Permanen.
+
+### 39.3 Batas yang sama, sekali lagi
+
+Ini perwujudan batas lama: **LD_PRELOAD tidak menjangkau biner statis**
+(bdk. §31.2 Bun, §35.2 svsp). Jalur yang secara arsitektur memang untuk kasus
+ini adalah **svsp** (terjemahan path di tingkat syscall, tanpa butuh loader):
+`svsp.c` sudah menerjemahkan `openat`/`execve`/`readlinkat`, sehingga uv di
+bawah svsp **seharusnya** membaca `/bin/sh` wadah lalu menjalankan
+`ld-musl-patched.so.1` — yang kini (berkat §38.1) mencetak banner versi dengan
+benar. **Hipotesis ini belum diuji di perangkat**; brief ronde 18 memintanya
+sebagai satu perintah opsional. Hasilnya tidak mengubah keputusan §39.2.
+
+### 39.4 Di luar cakupan
+
+Unduh Python Hermes masih tersangkut `dns error`/`EAI_AGAIN` — jaringan, bukan
+wadah. Tidak ada tindakan kode.

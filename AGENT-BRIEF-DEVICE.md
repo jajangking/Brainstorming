@@ -581,3 +581,34 @@ Dua perbaikan terkirim (HANDOFF §38):
    → apakah lolos deteksi libc tanpa `UV_LIBC`? (Kalau ya, §38.1 benar-benar
    menyembuhkan akarnya; `UV_LIBC=musl` tetap kami biarkan sebagai sabuk pengaman.)
 5. Bila DNS sudah sehat, lanjutkan Hermes sampai selesai — murni opsional.
+
+---
+
+# RONDE 18 (ringan, opsional) — satu uji untuk menutup topik uv
+
+§38 terverifikasi dua-duanya: install 48 detik dengan `.hermes` tetap di
+tempatnya, dan banner loader kembali benar. Terima kasih — strace Anda lagi-lagi
+yang menentukan.
+
+Temuan uv-statis Anda saya terima sepenuhnya: LD_PRELOAD tidak menjangkau biner
+statis, jadi `/bin/sh` miliknya bocor ke host Android. **`UV_LIBC=musl` naik
+status dari "sabuk pengaman" menjadi perbaikan permanen** (HANDOFF §39.2) —
+tidak akan saya cabut.
+
+Satu hipotesis yang belum diuji, dan hanya butuh satu perintah: jalur **svsp**
+memang dirancang untuk biner statis (terjemahan path di tingkat syscall), dan
+`svsp.c` sudah menangani `openat`/`execve`/`readlinkat`. Jadi uv di bawah svsp
+semestinya membaca `/bin/sh` **wadah** lalu menjalankan `ld-musl-patched.so.1`
+yang kini mencetak banner versi dengan benar.
+
+**Opsional, kerjakan hanya bila sempat:**
+```
+UV=$HOME/.hermes/tools/uv-0.12.3-linux-arm64-musl/uv
+fake-run --svsp "$UV" python list 2>&1 | tail -5          # asap: svsp bisa menjalankan uv?
+env -u UV_LIBC fake-run --svsp "$UV" python install 3.14 -v 2>&1 | tail -20
+```
+Pertanyaannya cuma satu: **apakah deteksi libc lolos tanpa `UV_LIBC` di jalur
+svsp?** Ya/tidak sama-sama berguna — kalau ya, itu bukti jalur svsp menutup
+celah biner statis; kalau tidak, saya catat batasnya dan topik ini tutup.
+
+Tidak ada tugas lain. Hermes yang tersangkut DNS tidak perlu dikejar.
