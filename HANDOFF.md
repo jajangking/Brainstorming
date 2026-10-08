@@ -1666,3 +1666,48 @@ mundurnya satu env: `FAKE_VIEW=container` di `fake-run`.
 Catatan: bila kasus 3 shim TETAP gagal sesudah ini, saya berhenti menambal shim
 untuk Bun — jalur **svsp sudah 4/4 sejak ronde 6** dan itu jawaban yang sah
 untuk tugas "OpenCode jalan di dalam wadah".
+
+## 29. RONDE 9 — ✅ TUGAS OPENCODE SELESAI (matriks 12/12, selftest 0 FAIL)
+
+`device-feedback/ronde9.md` (basis `c5f9138`) + `device-feedback/selftest-ronde9.txt`:
+
+| Sasaran | Hasil |
+|---|---|
+| Matriks opencode 4 kasus × 3 jalur | ✅ **12/12 — pertama kali full hijau** |
+| `./selftest` penuh (17 tes) | ✅ **0 FAIL** — tak ada regresi apk/busybox dari §28 |
+| Kasus 3 shim (`LocationNotFoundError`) | ✅ **TERATASI** — TUI render, 0 baris error, 000→200 |
+| Regresi svsp | ✅ 4/4 (stabil sejak ronde 6) |
+
+Hipotesis getcwd ronde 8 dari device **terbukti**: menyilangkan namespace di
+dalam satu proses adalah akar bug terakhir. Risiko regresi yang saya khawatirkan
+di §28 **tidak terjadi** (selftest 0 FAIL), jadi `FAKE_VIEW=container` tetap
+sekadar escape hatch, bukan default.
+
+### 29.1 Perjalanan bug OpenCode (ringkas, untuk arsip)
+
+| Ronde | Temuan | Perbaikan |
+|---|---|---|
+| 5 | svsp: `ADDFD errno=9` dibalas `-EACCES` buta; shim: `cannot load serve` | — (diagnosis) |
+| 6 | O_PATH tak bisa lewat ADDFD (kernel `fget()` tolak `FMODE_PATH`) | §25.1 buka tanpa O_PATH; errno asli |
+| 7 | `FAKEROOT_EXE` tak pernah di-set `fake-run`; Bun baca `/proc/self/exe` via syscall mentah | §26 env + fallback `cmdline[1]` + jaring pengaman spawn |
+| 8 | `realpath` selalu melepas prefix base | §27 jawab di namespace yang ditanyakan |
+| 9 | `getcwd` silang-namespace (`pwd -P`=/root vs kernel=host) | §28 getcwd = kebenaran host |
+
+Sudut yang **sengaja dibiarkan** (batas arsitektural, bukan kelalaian):
+`O_PATH|O_NOFOLLOW` pada simlink → ELOOP di svsp. Tak ada fd non-`O_PATH` yang
+mewakili simlink dan ADDFD menolak `FMODE_PATH`.
+
+### 29.2 Sisa kecil yang diperbaiki ronde ini
+
+- **`FAKE_VIEW` tak lolos `env -i`** (temuan device §4): hatch §28 senyap tak
+  berefek lewat `fake-run`. Kini diteruskan eksplisit seperti `SVSP_DEBUG`/`FK_DEBUG`.
+- **`pwd` logis masih `/root`** setelah `cd /root` eksplisit: itu `$PWD` yang
+  di-set shell dari argumen yang diketik, **bukan** hasil `getcwd` — di luar
+  jangkauan shim dan tanpa dampak (kasus 3 ✅). Dicatat, tidak ditambal.
+
+### 29.3 Status proyek
+
+Dua tugas besar selesai: **§17 bug wadah (ronde 4, selftest 0 FAIL)** dan
+**OpenCode di dalam wadah (ronde 9, 12/12 + selftest 0 FAIL)**. Ketiga jalur
+(natif, svsp, shim) kini menjalankan OpenCode penuh termasuk spawn anak dan
+`--standalone`.

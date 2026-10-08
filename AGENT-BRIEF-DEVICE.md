@@ -320,3 +320,28 @@ utang ronde 5 resmi lunas.
 Catatan arah: bila kasus 3 shim tetap ❌ setelah ini, kami **berhenti menambal
 shim untuk Bun**. Jalur svsp sudah 4/4 sejak ronde 6 = tugas "OpenCode jalan di
 dalam wadah" sudah tercapai; shim hanya bonus.
+
+---
+
+# RONDE 10 — verifikasi penutup (ringan)
+
+**Ronde 9 = 12/12 + selftest 0 FAIL. Tugas OpenCode SELESAI.** Hipotesis getcwd
+Anda (ronde 8) yang memecahkannya, dan protokol keadaan bersih Anda yang membuat
+semua angka ini bisa dipercaya — terima kasih.
+
+Satu perbaikan kecil dari temuan Anda §4: `FAKE_VIEW` kini diteruskan melewati
+whitelist `env -i` (sejajar `SVSP_DEBUG`/`FK_DEBUG`).
+
+**Tugas (singkat saja, tidak perlu matriks penuh lagi):**
+1. `git pull && ./install.sh`.
+2. Verifikasi hatch kini hidup:
+   `env -u LD_PRELOAD FAKE_VIEW=container fake-run /bin/sh -c 'echo V=$FAKE_VIEW; cd /root && pwd -P'`
+   → harapkan `V=container` dan `pwd -P` = `/root` (tampilan wadah lama).
+   Lalu tanpa `FAKE_VIEW` → `pwd -P` = path host.
+3. Asap singkat: `./selftest` (pastikan tetap 0 FAIL) + `opencode --standalone`
+   lewat svsp **dan** shim (cukup "TUI render ya/tidak").
+4. Bila semua hijau, cukup tulis ringkas — ini ronde penutup kecuali Anda
+   menemukan sesuatu.
+
+Catatan: bila `FAKE_VIEW=container` ternyata memecahkan sesuatu, laporkan; hatch
+itu hanya jalan mundur, default host sudah terbukti aman (selftest 0 FAIL).

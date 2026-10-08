@@ -143,6 +143,10 @@ mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true
 dbg_env=()
 [ -n "${SVSP_DEBUG:-}" ] && dbg_env+=("SVSP_DEBUG=$SVSP_DEBUG")
 [ -n "${FK_DEBUG:-}" ] && dbg_env+=("FK_DEBUG=$FK_DEBUG")
+# §29: FAKE_VIEW (escape hatch tampilan cwd, lihat HANDOFF §28) juga harus
+# lolos whitelist `env -i` — tanpa ini `FAKE_VIEW=container fake-run ...`
+# senyap tak berefek (temuan device ronde 9 §4).
+[ -n "${FAKE_VIEW:-}" ] && dbg_env+=("FAKE_VIEW=$FAKE_VIEW")
 
 cd "$HOME_BASE"
 # Opsional: mulai dari direktori lain (mis. /root wadah agar prompt pendek).
