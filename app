@@ -30,9 +30,15 @@ run_app() {
         [ -d "$d" ] || continue
         for f in "$d"/*; do
             [ -f "$f" ] && [ -x "$f" ] || continue
-            [ -L "$f" ] && continue                        # symlink applet
             bn=$(basename "$f")
             case "$bn" in "$want") ;; *) continue ;; esac
+            # symlink: ikuti ke target (kecuali applet busybox)
+            if [ -L "$f" ]; then
+                t=$(readlink -f "$f" 2>/dev/null)
+                case "$t" in */busybox|*/bin/busybox) continue ;; esac
+                [ -n "$t" ] && [ -x "$t" ] || continue
+                f="$t"
+            fi
             printf '\033[?25h' 2>/dev/null || true
             exec "$f" "$@"
         done
@@ -65,8 +71,42 @@ fi
 
 min_bytes=$(( APP_MIN_MB * 1024 * 1024 ))
 seen=""
+seen_ino=""
 rows=""
 count=0
+
+# ------------------------------------------------------------------ versi
+# Menjalankan `--version` itu mahal: tiap probe = satu proses (lewat supervisor
+# kalau di dalam wadah). Karena itu hasilnya dicache di
+# $HOME_DIR/.cache/app-versions, key = "path size mtime". `app` kedua kali
+# berjalan hampir instan, dan probing hanya terjadi untuk file yang berubah.
+CACHE="$HOME_DIR/.cache/app-versions"
+mkdir -p "$HOME_DIR/.cache" 2>/dev/null || true
+
+ver_of() { # <bin> -> baris versi pertama (kosong bila gagal/tak diketahui)
+    f="$1"
+    st=$(stat -c '%s:%Y' "$f" 2>/dev/null) || return 1
+    key="$f|$st"
+    if [ -f "$CACHE" ]; then
+        # Tanpa -x: baris cache adalah "<path>|<size>:<mtime>|<versi>", jadi
+        # pencocokan harus awalan (prefix), bukan seluruh baris.
+        hit=$(grep -F -m1 -- "$key|" "$CACHE" 2>/dev/null | head -1)
+        if [ -n "$hit" ]; then
+            # buang key "<path>|<size>:<mtime>|" -> sisakan versinya
+            printf '%s' "${hit#"$key|"}"
+            return 0
+        fi
+    fi
+    # Cache miss. Menjalankan biner mahal (lewat supervisor = proses ekstra),
+    # jadi probing hanya atas permintaan: APP_PROBE=1 app. Tanpa itu versi
+    # kosong dibiarkan — tabel tetap akurat nama/ukuran/lokasi, dan hanya
+    # kolom VERSI yang belum terisi.
+    [ "${APP_PROBE:-0}" = 1 ] || return 0
+    out=$(timeout 8 "$f" --version </dev/null 2>/dev/null | head -1 | tr -d '\r')
+    printf '%s|%s\n' "$key" "$out" >> "$CACHE" 2>/dev/null || true
+    printf '%s' "$out"
+    return 0
+}
 
 for d in $APPDIRS; do
     [ -d "$d" ] || continue
@@ -74,8 +114,31 @@ for d in $APPDIRS; do
         [ -f "$f" ] || continue
         [ -x "$f" ] || continue
         bn=$(basename "$f")
-        # buang symlink (applet busybox) & duplikat nama
-        [ -L "$f" ] && continue
+        # --- symlink ---
+        #  * symlink ke busybox (applet)     -> buang
+        #  * symlink ke file >= ambang        -> ikut (ukuran = target)
+        #  * symlink ke file kecil (launcher) -> ikut bila target-nya
+        #   _skrip yang memanggil app besar_;| follow 1-2 tingkat
+        #    lalu cari executable >= ambang di path yang dirujuk skrip.
+        # PENTING: tgt WAJIB di-set untuk file biasa juga. Kalau hanya di
+        # dalam cabang symlink, iterasi berikutnya mewarisi tgt lama sehingga
+        # stat/size/inode dibaca dari file yang SALAH (device 2026-10-09:
+        # opencode & node hilang dari daftar).
+        if [ -L "$f" ]; then
+            tgt=$(readlink -f "$f" 2>/dev/null)
+            case "$tgt" in
+                */busybox|*/bin/busybox) continue ;;
+                *) [ -n "$tgt" ] && [ -x "$tgt" ] || continue ;;
+            esac
+            tsz=$(stat -c %s "$tgt" 2>/dev/null || echo 0)
+            [ "$tsz" -ge "$min_bytes" ] || continue     # symlink kecil: bukan app
+        else
+            tgt="$f"
+        fi
+        # dedupe by inode: python/python3/python3.14 = file yang sama
+        ino=$(stat -c %i "$tgt" 2>/dev/null || echo "$f")
+        case " $seen_ino " in *" $ino "*) continue ;; esac
+        seen_ino="$seen_ino $ino"
         case " $seen " in *" $bn "*) continue ;; esac
         # buang alat sistem supaya tabel berisi aplikasi, bukan utilitas
         case "$bn" in
@@ -86,20 +149,47 @@ for d in $APPDIRS; do
             true|false|yes|sync|seq|strings|file|stat|df|du|free|uptime|hostname|\
             clear|reset|stty|script|uname|arch|who|id) continue ;;
             *.so|*.so.*|*.a|*.o|*.py|*.pl|*.sh) continue ;;
+            # helper turunan, bukan aplikasi mandiri
+            *-acp|*-mcp|*-harness|*-agent|*-gen-src) continue ;;
+            # alias berefiks angka (opencode2, node2) bukan app baru
+            *[0-9]) continue ;;
+            # helper interpreter & alat kecil lainnya
+            pip|pip[0-9]*|idle|idle[0-9]*|*-config|pyvenv.cfg|python3-dbg) continue ;;
         esac
-        # hanya yang "besar"
-        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-        [ "$sz" -ge "$min_bytes" ] || continue
+        sz=$(stat -c %s "$tgt" 2>/dev/null || echo 0)
+        # Ukuran >= ambang -> pasti aplikasi (mis. opencode 195 MB).
+        if [ "$sz" -lt "$min_bytes" ]; then
+            # Yang kecil (launcher/venv ~100 B) hanya diterima kalau ada di
+            # direktori milik user (~/.local/bin, ~/.opencode/bin, ...): di
+            # sana isinya memang aplikasi, sedangkan /usr/local/bin & /opt
+            # bisa berisi utilitas kecil yang tak terkait.
+            case "$f" in
+                "$HOME_DIR"/*) : ;;
+                *) continue ;;
+            esac
+        fi
         seen="$seen $bn"
-        # versi: jalankan --version dengan timeout pendek, ambil baris pertama
-        ver=$(timeout 8 "$f" --version 2>/dev/null | head -1 | tr -d '\r')
-        [ ${#ver} -gt 48 ] && ver=$(printf '%s…' "$(printf '%s' "$ver" | cut -c1-47)")
-        [ -n "$ver" ] || ver="-"
+        ver=$(ver_of "$tgt")
+        # rapikan: buang kontrol char, potong sesuai " · " / " / "
+        ver=$(printf '%s' "$ver" | sed 's/[[:cntrl:]]//g; s/[[:space:]]*$//')
         case "$ver" in
-            *[A-Za-z]*[0-9]*|*[0-9]*) : ;;
-            *) ver="-" ;;
+            *" · "*) ver=$(printf '%s' "$ver" | sed 's/ *·.*$//') ;;
+            *' / '*)  ver=$(printf '%s' "$ver" | sed 's| *\/.*$||') ;;
         esac
+        [ ${#ver} -gt 34 ] && ver=$(printf '%s…' "$(printf '%s' "$ver" | cut -c1-33)")
+        # Versi kosong = belum pernah di-probe. APP_PROBE=1 akan mengisinya.
+        [ -n "$ver" ] || ver="—"
         short=$(printf '%s' "$f" | sed "s|^$HOME_DIR||")
+        # dedupe lintas nama: versi identik + basename mirip = app yang sama
+        # (mis. opencode & opencode2, hermes & hermes-acp)
+        if printf '%s' "$rows" | cut -d'|' -f2 | grep -qxF "$ver"; then
+            base_a=$(printf '%s' "$bn" | sed 's/[0-9]*$//')
+            dup=0
+            for r in $(printf '%s' "$rows" | cut -d'|' -f1); do
+                [ "$(printf '%s' "$r" | sed 's/[0-9]*$//')" = "$base_a" ] && dup=1 && break
+            done
+            [ "$dup" = 1 ] && continue
+        fi
         rows="$rows$bn|$ver|$(( sz / 1024 / 1024 )) MB|$short
 "
         count=$(( count + 1 ))
