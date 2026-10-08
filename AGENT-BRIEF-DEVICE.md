@@ -462,3 +462,34 @@ dibuktikan di sandbox dgn harness seccomp.
    nomor syscall-nya (`si_syscall`) — kami perlu tahu syscall mana lagi.
 5. Catat juga bila ada perilaku yang BERUBAH gara-gara ENOSYS (mis. program yang
    dulu "jalan" karena EPERM) — itu risiko yang saya terima sadar.
+
+---
+
+# RONDE 15 — handler SIGSYS kini tahan ditimpa (akar temuan Anda)
+
+Strace Anda yang memecahkan ini: bash menimpa handler SIGSYS kami saat `trap`,
+jadi konversi ENOSYS §34 tak pernah jalan. Repro minimal Anda (`trap ":" EXIT`
++ perintah ber-PATH-search) langsung menunjuk sasarannya.
+
+Fix (HANDOFF §35): `sigaction()`/`signal()` untuk SIGSYS kini di-interpose —
+permintaan aplikasi dicatat & dilaporkan balik, tapi handler yang terpasang di
+kernel tetap milik shim; SIGSYS non-seccomp tetap diteruskan ke aplikasi.
+
+**Tugas:**
+1. `git pull && ./install.sh`.
+2. **Regresi dulu** (perubahan ini menyentuh semua proses ber-shim):
+   `./selftest` (0 FAIL?) + `alpine` → `opencode` (TUI?) + `apk add/del` apa pun.
+3. Repro minimal Anda sendiri, dgn shim:
+   - `alpine -c 'set -u; trap ":" EXIT; echo "[$(uname -s)]"'` → harapkan `[Linux]`
+   - `alpine -c 'trap ":" EXIT; x=$(env); echo ${#x}'` → harapkan > 0
+4. `alpine -c 'bash /tmp/hermes-install.sh'` → `Bad system call` hilang?
+   (Pesan deteksi Termux boleh tetap muncul — itu kebijakan installer.)
+5. **Pertanyaan untuk Anda** (menentukan kerja berikutnya): rekomendasi Anda
+   menaruh `faccessat2` di filter svsp **tidak bisa** — filter seccomp bertumpuk
+   dan `RET_TRAP` Android selalu mengalahkan `RET_USER_NOTIF` svsp (itu sebabnya
+   `--svsp` Anda tetap RC=159). Opsi yang mungkin: preload shim mini
+   "sigsys-guard" (hanya handler SIGSYS, tanpa rewrite path) di jalur svsp.
+   **Apakah Anda nyata memakai svsp untuk program dinamis ber-`trap`?**
+   Kalau tidak, saya tidak akan menambah komponen baru demi kasus teoretis.
+6. Laporkan bila ada program yang perilakunya berubah karena sigaction
+   SIGSYS-nya "tidak benar-benar terpasang" (risiko yang saya terima sadar).

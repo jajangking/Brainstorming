@@ -38,6 +38,9 @@
 #include <limits.h>
 #include <errno.h>
 #include <signal.h>
+#ifndef SYS_SECCOMP          /* si_code SIGSYS: trap dari filter seccomp */
+#define SYS_SECCOMP 1
+#endif
 #include <spawn.h>
 #include <ucontext.h>
 #include <sys/syscall.h>
@@ -58,9 +61,39 @@ static const char *fk_base;
 /* ------------------------------------------------------------------ */
 /* 1. SIGSYS handler (netralisir seccomp)                             */
 /* ------------------------------------------------------------------ */
+/* §35: handler aplikasi utk SIGSYS (bila ada) — lihat sigaction()/signal()
+ * di bawah. Handler KAMI harus tetap yang terpasang di kernel, kalau tidak
+ * trap seccomp Android (mis. faccessat2) langsung mematikan proses. */
+static struct sigaction fk_app_sigsys;
+static int fk_app_sigsys_set;
+
 static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = uctx;
     (void)sig;
+
+    /* Bukan trap seccomp (mis. raise(SIGSYS) oleh program): bukan urusan kita,
+     * teruskan ke handler aplikasi; bila tak ada, kembalikan perilaku default. */
+    if (info->si_code != SYS_SECCOMP) {
+        if (fk_app_sigsys_set) {
+            if ((fk_app_sigsys.sa_flags & SA_SIGINFO) && fk_app_sigsys.sa_sigaction) {
+                fk_app_sigsys.sa_sigaction(sig, info, uctx);
+                return;
+            }
+            if (fk_app_sigsys.sa_handler && fk_app_sigsys.sa_handler != SIG_IGN &&
+                fk_app_sigsys.sa_handler != SIG_DFL) {
+                fk_app_sigsys.sa_handler(sig);
+                return;
+            }
+            if (fk_app_sigsys.sa_handler == SIG_IGN) return;
+        }
+        /* Tak ada handler aplikasi: tiru kematian default SIGSYS.
+         * (Pendekatan: keluar dgn 128+SIGSYS. Tidak 100% identik dgn mati
+         *  oleh sinyal, tapi jalur ini langka — SIGSYS non-seccomp tanpa
+         *  handler — dan jauh lebih aman daripada bermain rt_sigaction
+         *  mentah di dalam handler.) */
+        _exit(128 + SIGSYS);
+    }
+
     uc->uc_mcontext.pc = (unsigned long)info->si_call_addr + 4;
     switch (info->si_syscall) {
     case SYS_setgid: case SYS_setuid: case SYS_setreuid:
@@ -1126,6 +1159,31 @@ char *getcwd(char *buf, size_t n) {
 }
 char *getwd(char *buf) { return getcwd(buf, PATH_MAX); }
 
+/* §35: JAGA handler SIGSYS milik shim.
+ * Device ronde 14 membuktikan: `bash` memasang handler SIGSYS sendiri begitu
+ * ada `trap ... EXIT`, menimpa handler kami; sesudah itu trap seccomp Android
+ * pada faccessat2 tidak lagi dikonversi -> bash me-reset SIG_DFL lalu bunuh
+ * diri ("Bad system call"). Maka: permintaan aplikasi untuk SIGSYS kita CATAT
+ * (dan laporkan balik saat ditanya) tetapi handler yang benar-benar terpasang
+ * di kernel tetap milik kami; SIGSYS non-seccomp diteruskan ke aplikasi. */
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+    NEXT(sigaction);
+    if (sig != SIGSYS) return CALL(sigaction, sig, act, old);
+    if (old) *old = fk_app_sigsys_set ? fk_app_sigsys : (struct sigaction){ .sa_handler = SIG_DFL };
+    if (act) { fk_app_sigsys = *act; fk_app_sigsys_set = 1; }
+    return 0;                      /* handler kami dibiarkan terpasang */
+}
+
+void (*signal(int sig, void (*h)(int)))(int) {
+    NEXT(signal);
+    if (sig != SIGSYS) return CALL(signal, sig, h);
+    void (*prev)(int) = fk_app_sigsys_set ? fk_app_sigsys.sa_handler : SIG_DFL;
+    memset(&fk_app_sigsys, 0, sizeof fk_app_sigsys);
+    fk_app_sigsys.sa_handler = h;
+    fk_app_sigsys_set = 1;
+    return prev;
+}
+
 /* ------------------------------------------------------------------ */
 /* 3. Resolver DNS sendiri (getaddrinfo / gethostbyname)              */
 /*    LATAR: di libc musl (dibangun direct-call, PLT hanya utk malloc  */
@@ -1581,5 +1639,10 @@ static void fk_init(void) {
     sa.sa_sigaction = fk_sigsys;
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGSYS, &sa, NULL);
+    /* WAJIB lewat sigaction libc ASLI: `sigaction` biasa kini di-interpose
+     * oleh kita sendiri (§35) dan hanya MENCATAT permintaan tanpa memasang
+     * apa pun — memanggilnya di sini akan membuat handler tak pernah
+     * terpasang dan proses mati di trap seccomp pertama. */
+    NEXT(sigaction);
+    CALL(sigaction, SIGSYS, &sa, NULL);
 }

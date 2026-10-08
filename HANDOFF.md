@@ -1938,3 +1938,60 @@ kini memicu fallback libc alih-alih mematikan tooling.
   (supervisor menangani di level syscall), bukan ldpreload.
 - Saran `env -u LD_PRELOAD` tetap valid sebagai jalan pintas, tapi kini bukan
   satu-satunya jalan untuk kasus `access()`.
+
+## 35. RONDE 14 — SIGSYS: handler shim ditimpa aplikasi (akar sebenarnya)
+
+`device-feedback/ronde14.md` (basis `3912529`): §34 **memperbaiki kasus dasar**
+(`uname -s`, `type uname`, `$(uname -s)` kini terisi; dulu kosong) dan
+**tanpa regresi** (`selftest` 0 FAIL, `alpine`→`opencode` TUI). Tapi script
+Hermes tetap mati, dan device menemukan sebabnya dengan strace:
+
+```
+rt_sigaction(SIGSYS, {libfakeroot}) = 0          <- handler kami
+rt_sigaction(SIGSYS, {0x557ce5f9b0}, {libfakeroot}) = 0   <- BASH MENIMPANYA (saat `trap`)
+[child] SIGSYS {si_code=SYS_SECCOMP, si_syscall=faccessat2}
+[child] rt_sigaction(SIGSYS, {SIG_DFL}) ; kill(getpid(), SIGSYS)  -> mati
+```
+
+Repro minimal device sangat tajam: `trap ":" EXIT` + perintah yang butuh
+pencarian PATH = mati; tanpa `trap`, atau dengan path absolut = jalan.
+
+**Jadi konversi `-ENOSYS` (§34) hanya menolong selama handler kami masih
+terpasang.** Begitu program memasang handler SIGSYS sendiri, trap seccomp
+Android kembali mematikan proses.
+
+### 35.1 FIX — handler shim dijaga, SIGSYS aplikasi tetap dihormati
+
+`sigaction()` dan `signal()` kini di-interpose **khusus untuk SIGSYS**:
+permintaan aplikasi **dicatat** (dan dilaporkan balik saat ditanya), tetapi
+handler yang benar-benar terpasang di kernel tetap milik shim. Di dalam
+handler: `si_code == SYS_SECCOMP` → kita tangani (konversi ENOSYS dll.);
+selain itu (mis. `raise(SIGSYS)` asli) → diteruskan ke handler aplikasi.
+
+Jebakan yang ikut ketahuan & diperbaiki: konstruktor shim sendiri memanggil
+`sigaction()` — yang kini ter-interpose — sehingga handler **tak pernah
+terpasang**. Pemasangan di `fk_init` sekarang lewat `CALL(sigaction, ...)`
+(libc asli). Tanpa ini, shim justru lebih buruk daripada sebelumnya.
+
+Uji sandbox (meniru bash):
+
+| Perilaku | Hasil |
+|---|---|
+| aplikasi `sigaction(SIGSYS, app_handler)` | rc=0 (aplikasi tak melihat keanehan) |
+| handler nyata di kernel (dicek via `rt_sigaction` mentah) | **milik shim** (tahan timpa) |
+| `raise(SIGSYS)` non-seccomp | handler **aplikasi** dipanggil |
+| proses selamat | ya |
+
+### 35.2 Rekomendasi device #1 (`faccessat2` ke filter svsp): TIDAK BISA
+
+Saya tolak dengan alasan teknis, bukan malas: filter seccomp **bertumpuk** dan
+kernel memilih aksi **paling keras**. `SECCOMP_RET_TRAP` (filter Android)
+lebih keras daripada `SECCOMP_RET_USER_NOTIF` (filter svsp), jadi menambahkan
+`faccessat2` ke svsp **tidak akan pernah** mengalahkan trap Android —
+persis yang device amati (`fake-run --svsp ... -> RC=159`).
+
+Konsekuensinya jujur: **jalur svsp tetap rentan** untuk program yang memasang
+handler SIGSYS sendiri, karena di sana tak ada shim yang menjaga handler.
+Opsi yang tersedia bila ini mengganggu: preload shim mini "sigsys-guard"
+(hanya handler, tanpa rewrite path) juga di jalur svsp. **Belum dikerjakan** —
+menunggu device mengonfirmasi apakah kasus ini nyata dipakai.
