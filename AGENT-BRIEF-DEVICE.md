@@ -514,3 +514,36 @@ ber-`trap` benar-benar dijalankan lewat svsp, rancangannya sudah siap.
 
 Terima kasih untuk strace ronde 14 — tanpa itu saya akan terus menambal gejala
 (`ENOSYS`) tanpa pernah melihat bahwa handler kami memang ditimpa.
+
+---
+
+# RONDE 16 — uv tak bisa mendeteksi libc (lanjutan Hermes)
+
+Pemilik melanjutkan Hermes sampai tahap Python dan kena:
+`Failed to determine the libc used on the current platform`.
+
+Saya baca sumber uv: ia membaca PT_INTERP `/bin/sh` lalu **menjalankan loader itu
+tanpa argumen** dan mencari `Version x.y` di stderr. Karena pesan errornya
+`NoLibcFound` (bukan `NoCommonBinariesFound`), langkah "temukan loader" berhasil —
+yang gagal adalah menjalankan loader kita (HANDOFF §37).
+
+Sudah dikirim: `fake-run` kini men-set `UV_LIBC=musl` (fakta, wadah ini memang
+musl; override user tetap menang) di jalur shim & svsp.
+
+**Tugas:**
+1. `git pull && ./install.sh`, lalu `./selftest` (0 FAIL?) — regresi dulu.
+2. **Diagnostik akar (yang paling saya butuhkan):** di dalam wadah,
+   ```
+   alpine -c '$FAKE_BASE/lib/ld-musl-patched.so.1 ; echo "RC=$?"' 2>&1 | head -20
+   alpine -c '/lib/ld-musl-patched.so.1 2>&1 | head -5; echo RC=$?'
+   alpine -c '/lib/ld-musl-aarch64.so.1 2>&1 | head -5; echo RC=$?'
+   ```
+   Pertanyaannya: apakah loader **stock** mencetak `musl libc (aarch64) / Version
+   1.2.x` sementara loader **patched** tidak? Itu akan memastikan dugaan saya.
+3. Ulangi Hermes: `alpine -c 'bash /tmp/hermes-install.sh'` → apakah tahap
+   Python lewat sekarang? (uv seharusnya pakai `UV_LIBC`.) Bila masih gagal,
+   lampirkan `UV_LIBC` yang terlihat uv (`alpine -c 'echo $UV_LIBC'`) dan
+   `uv python install -v` baris tracing libc-nya.
+4. Bila loader patched memang tak mencetak banner, laporkan saja — perbaikannya
+   (menyusun ulang situs patch) akan saya pertimbangkan terpisah; jangan ubah
+   loader sendiri.

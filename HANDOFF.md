@@ -2038,3 +2038,47 @@ diuji; dicatat agar tidak membingungkan di kemudian hari.
 Rangkaian SIGSYS (§34 ENOSYS → §35 anti-timpa) **selesai**. Proyek kembali ke
 status tertutup seperti §33, dengan tambahan: installer pihak ketiga yang
 memakai `trap` + pencarian PATH kini jalan di dalam wadah.
+
+## 37. Hermes lanjut — `uv` gagal mendeteksi libc di wadah
+
+Laporan pemakaian (pemilik, 2026-10-08): setelah git tersedia, Hermes clone OK,
+uv 0.12.3 (linux-arm64-musl) terpasang, lalu **gagal** di tahap Python:
+
+```
+error: Failed to determine the libc used on the current platform
+  Caused by: Could not detect either glibc version nor musl libc version
+✗ bootstrap Python installation failed
+```
+
+### 37.1 Mekanisme uv (dibaca dari sumber `astral-sh/uv`, `crates/uv-platform/src/libc.rs`)
+
+1. `find_ld_path()` — coba `/bin/sh`, `/usr/bin/env`, `/bin/dash`, `/bin/ls`;
+   baca **PT_INTERP** biner pertama yang bisa diparse.
+2. `detect_musl_version(ld_path)` — **JALANKAN loader itu tanpa argumen**, cari
+   regex `Version ([0-9]+)\.([0-9]+)` di stdout/stderr.
+3. Bila gagal: coba baca symlink `ld-X.Y.so` (pola glibc), lalu
+   `ld.so --version` (glibc). Semua gagal → `NoLibcFound` (pesan di atas).
+
+Penting: pesan error yang muncul adalah `NoLibcFound`, **bukan**
+`NoCommonBinariesFound` — artinya langkah 1 **berhasil** (uv menemukan PT_INTERP
+`$BASE/lib/ld-musl-patched.so.1`) dan yang gagal adalah langkah 2: menjalankan
+loader kita tidak menghasilkan string `Version x.y`.
+
+Kandidat sebabnya (belum dipastikan, butuh data device): loader hasil patch
+(7 situs → `mov w0,#0; ret`) mungkin tidak lagi mencetak banner usage/versi saat
+dijalankan tanpa argumen, atau eksekusinya gagal/senyap.
+
+### 37.2 Tindakan sekarang: `UV_LIBC=musl` sebagai default wadah
+
+`uv` memeriksa env `UV_LIBC` **sebelum** deteksi otomatis (`Libc::from_env`).
+Wadah ini **selalu** musl, jadi nilainya bukan tebakan melainkan fakta. `fake-run`
+kini meneruskan `UV_LIBC=${UV_LIBC:-musl}` di **kedua** jalur exec (shim & svsp);
+nilai yang di-set user tetap menang.
+
+Diuji: tanpa set → `UV_LIBC=musl`; `UV_LIBC=gnu` → `gnu` (override jalan);
+dipakai di kedua baris exec `fake-run`.
+
+Catatan jujur: ini **mengatasi gejala dengan fakta yang benar**, bukan
+memperbaiki loader. Kalau ternyata loader patched memang tak lagi mencetak
+banner, itu bug tersendiri yang bisa memengaruhi alat lain yang memprobe libc
+dengan cara sama — karena itu brief ronde 16 meminta diagnostik langsungnya.

@@ -147,6 +147,12 @@ dbg_env=()
 # lolos whitelist `env -i` — tanpa ini `FAKE_VIEW=container fake-run ...`
 # senyap tak berefek (temuan device ronde 9 §4).
 [ -n "${FAKE_VIEW:-}" ] && dbg_env+=("FAKE_VIEW=$FAKE_VIEW")
+# §37: wadah ini SELALU musl. Deteksi libc otomatis milik uv (baca PT_INTERP
+# /bin/sh lalu JALANKAN loader dan cari "Version x.y" di stderr) gagal di sini
+# — loader kita bernama/ter-patch sendiri. Tanpa ini: "Failed to determine the
+# libc used on the current platform" saat `uv python install` (device: bootstrap
+# Hermes Agent). Nilai dari luar tetap menang bila user sengaja men-set.
+dbg_env+=("UV_LIBC=${UV_LIBC:-musl}")
 
 cd "$HOME_BASE"
 # Opsional: mulai dari direktori lain (mis. /root wadah agar prompt pendek).
