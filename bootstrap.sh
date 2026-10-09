@@ -384,6 +384,10 @@ install() {
         install_atomic "$SRC/hermes-web-build" "$PREFIX/bin/hermes-web-build"
     [ -f "$SRC/web-split.mjs" ] && \
         install_atomic "$SRC/web-split.mjs" "$PREFIX/bin/web-split.mjs" 0644
+    # §54c: orkestrator instalasi Hermes sampai complete (update + deps +
+    # web + TUI + tail, retry aman). Host-side saja.
+    [ -f "$SRC/hermes-setup" ] && \
+        install_atomic "$SRC/hermes-setup" "$PREFIX/bin/hermes-setup"
     # §51: preload Node anti-crash netlink. fake-run menyuntik NODE_OPTIONS
     # --require ke path ini bila berkasnya ada — jadi pemasangannya wajib di install.
     if [ -f "$SRC/node-wrap" ]; then

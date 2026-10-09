@@ -2536,7 +2536,16 @@ Catatan: TUI (esbuild Go) membuktikan batas Go yang tepat — bukan "Go tak
 bisa di Android", melainkan "Go yang memanggil access-check (faccessat2)
 tak bisa". Dokumentasi §41.4f dikoreksi ke arah ini.
 
-### 41.4i §54b — receipt key: env yang beda, npm yang beda
+### 41.4i §54c — `hermes-setup`: orkestrator satu perintah
+
+Empat workaround (§54 node-deps, §55 web split-phase, tail langsung,
+lock-basi aman) dirangkai jadi satu perintah idempoten + retry 3 ronde:
+update -> reinstall -> web-build -> TUI -> tail, verifikasi "Update
+complete!" tanpa "did not finish". Ronde perdananya langsung SELESAI
+(v0.21.6+301.g8bff64d, tree bersih tanpa .dirty). Tree Hermes tak
+disentuh sama sekali.
+
+### 41.4j §54b — receipt key: env yang beda, npm yang beda
 
 `hermes-reinstall` pertama memakai `npm ci` mentah (tak menulis receipt) lalu
 versi kedua memanggil `node-deps.mjs` tapi dengan PATH rakitan sendiri —
