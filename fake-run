@@ -28,6 +28,7 @@ SHIM="${FAKE_SHIM:-$HOME/libfakeroot.so}"
 LOADER="${FAKE_LOADER:-$HOME/alpine-rootfs/lib/ld-musl-patched.so.1}"
 SVSP="${FAKE_SVSP:-}"
 MODE=auto
+MODE_EXPLICIT=0  # 1 bila user eksplisit --svsp/--ldpreload (fallback svsp hanya utk auto)
 
 # opsi --loader/--shim/--base/--svsp dan ENV=val di depan
 usage() {
@@ -58,8 +59,8 @@ while [ $# -gt 0 ]; do
         --loader=*) LOADER="${1#--loader=}"; shift ;;
         --shim=*)   SHIM="${1#--shim=}"; shift ;;
         --base=*)   HOME_BASE="${1#--base=}"; shift ;;
-        --svsp)     MODE=svsp; shift ;;
-        --ldpreload) MODE=ldpreload; shift ;;
+        --svsp)     MODE=svsp; MODE_EXPLICIT=1; shift ;;
+        --ldpreload) MODE=ldpreload; MODE_EXPLICIT=1; shift ;;
         -h|--help)  usage 0 ;;
         -V|--version) echo "fake-run (Brainstorming) — Alpine fake-chroot runner"; exit 0 ;;
         *=*)        extra_env+=("$1"); shift ;;
@@ -183,6 +184,59 @@ if [ "$MODE" = auto ]; then
             sh|bash|dash|ash|ksh|zsh)                 MODE=svsp ;;
         esac
     fi
+fi
+
+# §NN (svsp fallback, non-breaking): supervisor USER_NOTIF bisa gagal total di
+# sebagian perangkat (Android 16: seccomp EBUSY "Resource busy" bahkan dari host
+# bersih, bukan cuma nested). Tanpa fallback, semua MODE=svsp mati total.
+# Probe murah tanpa efek samping (busybox true) SEBELUM menjalankan target:
+#   - probe OK (rc 0) -> exec svsp seperti biasa (perilaku lama, live stderr).
+#   - probe gagal listener + target dinamis (atau script ber-interp dinamis)
+#     -> MODE=ldpreload (jalur cepat, terbukti jalan).
+#   - probe gagal + target statis murni -> lanjut svsp + 1 baris petunjuk
+#     di stderr (error asli tetap dipertahankan).
+# Opt-out: FAKE_SVSP_BROKEN=1 (langsung ldpreload utk dinamis, tanpa probe),
+#          FAKE_SVSP_BROKEN=0 (anggap svsp sehat, perilaku lama persis).
+# Eksplisit --svsp selalu dihormati (tak pernah fallback otomatis).
+_svsp_fallback_ok() {
+    is_dynamic "$host" && return 0
+    [ -n "${interp:-}" ] && [ -n "${ih:-}" ] && is_dynamic "$ih" && return 0
+    return 1
+}
+if [ "$MODE" = svsp ] && [ "$MODE_EXPLICIT" = 0 ]; then
+    _svsp_broken=""
+    case "${FAKE_SVSP_BROKEN:-auto}" in
+        1) _svsp_broken=1 ;;
+        0) _svsp_broken="" ;;
+        *)
+            _svsp_probe_bin="$SVSP"
+            if [ -z "$_svsp_probe_bin" ]; then
+                for _d in "$(dirname "$0")" "$HOME" "$HOME/Brainstorming" "$PREFIX/bin"; do
+                    [ -x "$_d/svsp" ] && { _svsp_probe_bin="$_d/svsp"; break; }
+                done
+            fi
+            if [ -n "$_svsp_probe_bin" ] && [ -x "$_svsp_probe_bin" ] \
+               && [ -x "$HOME_BASE/bin/busybox" ]; then
+                _probe_err="$(mktemp "${TMPDIR:-/tmp}/fake-run-probe-XXXXXX.log" 2>/dev/null || echo "${TMPDIR:-/tmp}/fake-run-probe-$$.log")"
+                set +e
+                "$_svsp_probe_bin" --base="$HOME_BASE" "$HOME_BASE/bin/busybox" true </dev/null >/dev/null 2>"$_probe_err"
+                _probe_rc=$?
+                set -e
+                if [ $_probe_rc -ne 0 ] && grep -e "tak dapat listener" -e "Resource busy" -e "seccomp:" "$_probe_err" >/dev/null 2>&1; then
+                    _svsp_broken=1
+                fi
+                rm -f "$_probe_err"
+                unset _probe_rc _probe_err
+            fi
+            unset _svsp_probe_bin _d
+            ;;
+    esac
+    if [ -n "$_svsp_broken" ] && _svsp_fallback_ok; then
+        MODE=ldpreload
+    elif [ -n "$_svsp_broken" ]; then
+        echo "fake-run: catatan: svsp tak tersedia di perangkat ini (seccomp EBUSY); target statis butuh supervisor." >&2
+    fi
+    unset _svsp_broken
 fi
 
 mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true
