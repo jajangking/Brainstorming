@@ -8,7 +8,20 @@ examples/ebench
 examples/o2test
 examples/eptest
 
+# sisa install atomic (bootstrap: tulis .new lalu rename)
+*.new.*
+
+# cache runtime fake-run (kalau --cache diaktifkan)
+.fake-run.dyncache.*
+
 # lingkungan wadah — bukan sumber proyek (besar)
 alpine-rootfs/
+test-rootfs/
 alpine-minirootfs.tar.gz
 musl-dev-cache.apk
+linux-headers-cache.apk
+
+# output log mentahan (yang penting sudah ada di device-feedback/ronde*.md)
+device-feedback/*.txt
+
+.DS_Store
