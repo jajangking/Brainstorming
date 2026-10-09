@@ -2435,6 +2435,63 @@ Tapi itu **tidak menghalangi Hermes**: `npm ci` tetap selesai
 `web/node_modules` terisi penuh. Yang hilang cuma pemasangan git hook —
 tidak dibutuhkan untuk menjalankan Hermes.
 
+### 41.4f §54 — `hermes-reinstall`: leveraging fix upstream Hermes
+
+Correksi penting atas §41.4c. Error `lefthook` **bukan** kasus yang perlu
+diperbaiki di distro — dan saya wasting waktu mengira begitu.
+
+`git log` repo Hermes (yang ter-clone di dalam wadah) menunjukkan upstream
+**sudah** menyelesaikan masalah yang persis sama:
+
+```
+a50c4ba7c9  fix: skip lefthook install when there is no .git
+            "Docker builds copy the source without .git. npm ci runs the
+             root prepare script, and lefthook install exits 128 there, so
+             the image build failed in node-deps.mjs."
+```
+
+`package.json:27`:
+```js
+"prepare": "node -e \"...if(existsSync('.git'))process.exit(
+  spawnSync('lefthook',['install'],...))\""
+```
+
+Di Docker `.git` tidak ada → skip → aman. Di dalam wadah `.git` **ada**
+(installer clone repo, dan `hermes update` membutuhkannya), jadi syaratnya
+tak terpenuhi dan `lefthook` tetap dipanggil → SIGSYS.
+
+`hermes-reinstall` (baru, terpasang di `$PREFIX/bin`) memanfaatkan loophole yang
+sama: sembunyikan `.git` selama `npm ci`, lalu pulihkan. Tidak menyentuh file
+Hermes, idempotent, bisa diulang. `trap` memulihkan `.git` walau gagal di
+tengah jalan.
+
+```
+$ hermes-reinstall
+[+] sembunyikan .git selama npm ci (biar prepare skip lefthook)...
+[+] node   : node-26.7.0-linux-arm64-musl
+[+] npm    : 12.0.2
+[+] npm ci : ui-tui + web + root (butuh 1-2 menit)
+✅ Node dependencies installed
+added 556 packages in 41s
+[+] .git dipulihkan
+[+] verifikasi:
+    node_modules             344 entri
+    ui-tui/node_modules      2 entri
+    web/node_modules         4 entri
+```
+
+### 41.4g Yang saya pelajari (dan salah lagi)
+
+Saya sempat menyelidiki nol yang sudah tertulis di `git log` repo target.
+Kegagalan itu bukan karena tak ada ide, tapi karena saya tidak membaca sumber
+yang tersedia. Kalau distro mandek, cek dulu **`git log` aplikasi yang
+melapor** — bukan hanya arsitektur distro. Upstream sering sudah punya
+jawabannya; di sini ternyata sudah 1 hari sebelum saya mulai.
+
+§53 sendiri tetap valid sebagai perbaikan (anak statis di dalam shell tak
+lagi "kabur" untuk `newfstatat`), tapi klaim bahwa itu memperbaiki Hermes
+**salah** dan tak boleh diklaim lagi.
+
 ### 41.5 Dua pendekatan yang gagal (agar tak diulang)
 
 - **Optimasi `is_dynamic` (§46, sudah DIBATALKAN)**: mengganti `readelf`

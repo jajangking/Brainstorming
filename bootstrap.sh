@@ -371,6 +371,11 @@ install() {
     # dieksekusi dari dalam wadah, jadi beri petunjuk alih-alih "not found".
     [ -f "$SRC/alpine-in-container" ] && \
         install_atomic "$SRC/alpine-in-container" "$BASE/usr/local/bin/alpine"
+    # §54: rebuild Node deps Hermes Agent. Butuh workaround karena `npm ci`
+    # memanggil `lefthook` (biner Go statis) yang crash di Android — lihat
+    # HANDOFF §41.4f. Host-side saja; tak ada padanannya di dalam wadah.
+    [ -f "$SRC/hermes-reinstall" ] && \
+        install_atomic "$SRC/hermes-reinstall" "$PREFIX/bin/hermes-reinstall"
     # §51: preload Node anti-crash netlink. fake-run menyuntik NODE_OPTIONS
     # --require ke path ini bila berkasnya ada — jadi pemasangannya wajib di install.
     if [ -f "$SRC/node-wrap" ]; then

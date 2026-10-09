@@ -1,0 +1,121 @@
+#!/bin/sh
+# Rebuild Node dependencies Hermes Agent di dalam wadah Alpine.
+#
+# MASALAH (§54, device 2026-10-09): `npm ci` di repo Hermes gagal karena
+# `prepare` script memanggil `lefthook install`. lefthook itu biner Go
+# STATIS yang memanggil exec.LookPath -> syscall `faccessat2` (439), yang
+# diblokir Android dengan SECCOMP_RET_TRAP. Go runtime tidak memasang
+# handler SIGSYS, jadi proses langsung mati SIGSYS (rc=159).
+#
+# Ini batas kernel, BUKAN bug distro dan tidak bisa diperbaiki di userland:
+#   - handler SIGSYS di child supervisor hilang karena execv() me-reset
+#   - SIG_IGN (yang bertahan lewat execve) tetap dibunuh kernel, bukan -ENOSYS
+#   - filter Android menolak faccessat2 SEBELUM notifikasi supervisor
+#   - biner statis mengabaikan LD_PRELOAD
+#   - Go GOOS=android (build Termux) tidak punya faccessat2 sama sekali —
+#     hanya GOOS=linux yang punya, dan itulah yang dipakai lefthook
+#
+# SOLUSI: Hermes upstream SUDAH menyelesaikan ini di commit a50c4ba7c9
+# ("fix: skip lefthook install when there is no .git") — untuk kasus Docker
+# yang menyalin source tanpa .git. Prepare script-nya:
+#     if (existsSync('.git')) process.exit(spawnSync('lefthook', ['install'], ...))
+#
+# Di dalam wadah .git ADA (installer clone repo, dan `hermes update` butuh
+# itu), jadi syaratnya tak terpenuhi dan lefthook tetap dipanggil.
+#
+# Skrip ini memanfaatkan loophole yang sama: sembunyikan .git selama `npm ci`,
+# lalu kembalikan. Tidak menyentuh file Hermes, tidak mengubah apa pun,
+# dan sepenuhnya bisa diulang.
+#
+# Pakai:  hermes-reinstall            (host Termux)
+#        hermes-reinstall --keep      (tanpa restore .git, untuk debug)
+
+set -u
+SRC="$(cd "$(dirname "$0")" && pwd)"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+FAKE_RUN="$PREFIX/bin/fake-run"
+BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+HERMES="$BASE/root/.hermes/hermes-agent"
+KEEP_HIDDEN=0
+[ "${1:-}" = "--keep" ] && KEEP_HIDDEN=1
+
+die() { printf '\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
+log() { printf '\033[1;32m[+] %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
+
+[ -x "$FAKE_RUN" ] || die "fake-run tak ada: $FAKE_RUN (jalankan install.sh dulu?)"
+[ -d "$HERMES" ] || die "repo Hermes tak ada: $HERMES (jalankan installer Hermes dulu?)"
+[ -d "$HERMES/.git" ] || warn ".git tak ada — prepare script akan skip sendiri, tak perlu di-hide"
+
+# Node + npm milik Hermes (versi yang cocok dengan engine-strict-nya).
+NODE=""
+for c in "$BASE/root/.hermes/tools"/node-*/bin/node; do
+    [ -x "$c" ] && NODE="$c" && break
+done
+[ -n "$NODE" ] || die "biner Node Hermes tak ditemukan di $BASE/root/.hermes/tools/"
+NPM_CLI=""
+for c in "$BASE/root/.hermes/tools"/npm-*/lib/node_modules/npm/bin/npm-cli.js; do
+    [ -f "$c" ] && NPM_CLI="$c" && break
+done
+[ -n "$NPM_CLI" ] || die "npm-cli.js Hermes tak ditemukan di $BASE/root/.hermes/tools/"
+
+# L-capital: prefix Node FIRST, else npm yang di-PATH (versi container, 11.x)
+# ditolak engine-strict Hermes (butuh <11.10.0 || >=11.17.0).
+NODE_DIR="$(dirname "$NODE")"
+NPM_DIR="$(dirname "$(dirname "$NPM_CLI")")"
+export PATH="$NODE_DIR:$NPM_DIR:$PATH"
+
+restore_git() {
+    if [ -d "$HERMES/.git.off" ] && [ ! -e "$HERMES/.git" ]; then
+        mv "$HERMES/.git.off" "$HERMES/.git" && log ".git dipulihkan"
+    fi
+}
+trap 'restore_git' EXIT INT TERM
+
+if [ -d "$HERMES/.git" ]; then
+    log "sembunyikan .git selama npm ci (biar prepare skip lefthook)..."
+    mv "$HERMES/.git" "$HERMES/.git.off" || die "gagal sembunyikan .git"
+fi
+
+log "node   : $(basename "$(dirname "$NODE_DIR")")"
+# Node Hermes hanya bisa dieksekusi DI DALAM wadah (loader musl patched).
+# Host tak bisa menjalankannya,
+# jadi version dicetak dari dalam wadah (percuma; yang penting npm ditemukan
+# dan versinya memenuhi engine-strict — itu sudah terkonfirmasi oleh npm ci).
+NPVER="$(env -u LD_PRELOAD "$FAKE_RUN" --svsp --base="$BASE" /bin/sh -c \
+    '"$1" "$2" --version 2>/dev/null | head -1' _ "$NODE" "$NPM_CLI" 2>/dev/null)"
+log "npm    : ${NPVER:-<tak terbaca dari host — normal>}"
+log "npm ci : ui-tui + web + root (butuh 1-2 menit)"
+
+env -u LD_PRELOAD "$FAKE_RUN" --svsp --base="$BASE" /bin/sh -c '
+    cd "$1" || exit 1
+    exec "$2" "$3" ci --no-audit --no-fund --include=dev --include=optional \
+        --include-workspace-root=true --workspace ui-tui --workspace web \
+        --progress=true
+' _ "$HERMES" "$NODE" "$NPM_CLI"
+RC=$?
+
+if [ "$KEEP_HIDDEN" -eq 1 ] && [ -d "$HERMES/.git.off" ]; then
+    warn "--keep: .git TIDAK dipulihkan (untuk debug). Kembalikan manual:"
+    warn "        mv $HERMES/.git.off $HERMES/.git"
+    trap - EXIT INT TERM
+else
+    restore_git
+    trap - EXIT INT TERM
+fi
+
+[ "$RC" -eq 0 ] || die "npm ci gagal (rc=$RC)"
+
+log "verifikasi:"
+env -u LD_PRELOAD "$FAKE_RUN" --svsp --base="$BASE" /bin/sh -c '
+    cd "$1" || exit 1
+    for d in node_modules ui-tui/node_modules web/node_modules; do
+        if [ -d "$d" ]; then
+            printf "    %-24s %s entri\n" "$d" "$(ls "$d" | wc -l)"
+        else
+            printf "    %-24s HILANG\n" "$d"
+        fi
+    done
+' _ "$HERMES"
+
+log "selesai. Uji:  alpine  lalu  hermes --version"

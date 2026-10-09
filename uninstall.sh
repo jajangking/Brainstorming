@@ -54,7 +54,7 @@ done
 # --- kumpulkan target lebih dulu, supaya bisa diringkas & dikonfirmasi ------
 # Alat di host
 TOOLS=("$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$PREFIX/bin/alpine"
-       "$PREFIX/bin/app" "$HOME/libfakeroot.so")
+       "$PREFIX/bin/app" "$PREFIX/bin/hermes-reinstall" "$HOME/libfakeroot.so")
 # Cache unduhan
 CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
         "$HOME/linux-headers-cache.apk")
@@ -63,6 +63,10 @@ CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
 INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine"
         "$BASE/usr/local/share/fakeroot/node-netlink-safe.js"
         "$BASE/usr/local/share/fakeroot/procnet/if_inet6")
+# .git.off = .git yang disembunyikan hermes-reinstall (§54). Kalau process-nya
+# dibunuh di tengah jalan, file ini tertinggal dan `hermes update` ikut gagal —
+# jadi harus dikembalikan (bukan dihapus) saat uninstall.
+STASHED_GIT="$BASE/root/.hermes/hermes-agent/.git.off"
 # Direktori yang kita buat sendiri (sisa registry launcher dll).
 DIRS=("$PREFIX/share/brainstorming"
       "$BASE/usr/local/share/fakeroot")
@@ -124,6 +128,15 @@ for f in "${TOOLS[@]}"; do do_rm "$f" "alat"; done
 
 # 2) skrip di dalam wadah (selalu, meski --keep-rootfs)
 for f in "${INSIDE[@]}"; do do_rm "$f" "dalam wadah"; done
+# §54: kembalikan .git yang sempat disembunyikan, jangan dihapus.
+if [ -d "$STASHED_GIT" ] && [ ! -e "$BASE/root/.hermes/hermes-agent/.git" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "    akan dipulihkan: $STASHED_GIT -> $BASE/root/.hermes/hermes-agent/.git"
+    else
+        mv "$STASHED_GIT" "$BASE/root/.hermes/hermes-agent/.git" 2>/dev/null \
+            && echo "    dipulihkan: .git (tersembunyi dari hermes-reinstall)"
+    fi
+fi
 
 # 3) cache unduhan
 for f in "${CACHES[@]}"; do do_rm "$f" "cache"; done
