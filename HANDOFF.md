@@ -2685,3 +2685,38 @@ memuat baris PATH Hermes.
   `DT_INIT_ARRAY` tak dieksekusi → nol `rt_sigaction` di trace). Tetap di
   repo sebagai referensi pola (freestanding, offset ABI aarch64), bukan
   sebagai solusi glibc.
+
+## 42. RONDE 22 — svsp EBUSY di Android 16 + fallback otomatis (2026-10-10)
+
+Perangkat: Infinix X6855, Android 16 (SDK 36), kernel 6.12.38-android16-5.
+Temuan: `svsp` gagal total — `svsp(child): seccomp: Resource busy` +
+`svsp: tak dapat listener`, BAHKAN dari host Termux bersih (tanpa `FAKE_*`,
+tanpa `LD_PRELOAD`). `/proc/self/status`: `Seccomp: 2, Seccomp_filters: 2`
+(filter firmware sudah 2 lapis). Dugaan: firmware memakai USER_NOTIF untuk
+sandbox-nya sendiri / melarang `NEW_LISTENER` bagi `untrusted_app` (EBUSY,
+bukan EINVAL — filter valid tapi listener ditolak). Ini REGRESI vs TAHAP 3
+(svsp terbukti jalan saat ditulis) atau beda perangkat — belum dibiseksi;
+yang pasti di perangkat ini svsp = 0% jalan.
+
+Akibat: semua `MODE=svsp` mati — termasuk `fake-run sh` (dipaksa svsp oleh
+§53) dan `node` (§48). Padahal jalur LD_PRELOAD sehat (`cat
+/etc/alpine-release` → `3.24.2`, `sh` dinamis + `node v24.18.1` jalan).
+
+Fix (commit `2eacd33`, 1 file `fake-run` +56/-2, non-breaking):
+- Flag `MODE_EXPLICIT`: `--svsp`/`--ldpreload` eksplisit tak pernah di-fallback.
+- Probe `svsp busybox true` (stdin `/dev/null`, tanpa efek) sebelum target.
+- Probe gagal listener + target dinamis (atau script ber-interp dinamis) →
+  `MODE=ldpreload` diam-diam (tanpa output tambahan agar parser tak pecah).
+- Probe gagal + statis murni → lanjut svsp + 1 baris petunjuk di stderr
+  (error asli dipertahankan, rc=2).
+- Opt-out: `FAKE_SVSP_BROKEN=1` (langsung fallback) / `=0` (perilaku lama).
+- `exec` + live stderr dipertahankan untuk semua run nyata.
+
+Verifikasi (10 tes): cat dinamis OK; sh auto OK (tadinya mati); `--svsp`
+eksplisit error lama preserved; `--ldpreload` tetap; statis hint + rc=2;
+`BROKEN=0` perilaku lama; `BROKEN=1` tanpa probe; exit 3 diteruskan; stdin
+tak dicuri (`got:hello`); `node --version` OK.
+
+Yang TETAP rusak: binary STATIS murni butuh supervisor — di perangkat ini
+tak ada jalan (LD_PRELOAD tak berlaku untuk statis). Opsi ke depan: jalankan
+via uid shell (Shizuku) dari host, atau dokumentasikan sebagai batas perangkat.

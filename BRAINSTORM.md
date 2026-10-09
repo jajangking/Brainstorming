@@ -83,6 +83,18 @@ TAHAP 3 (SELESAI, terbukti): supervisor USER_NOTIF (svsp)
 TAHAP 4 (bukan prioritas): pembungkus APK hanya untuk distribusi/UX, bukan teknis
 ```
 
+### Batas baru (2026-10-10, Infinix X6855 / Android 16 SDK 36): USER_NOTIF ditolak
+
+- `svsp` gagal total di perangkat ini: `seccomp: Resource busy` (EBUSY, bukan
+  EINVAL) bahkan dari host bersih — firmware (`Seccomp_filters: 2`) menolak
+  `NEW_LISTENER` bagi `untrusted_app`. TAHAP 3 tetap valid di perangkat yang
+  mengizinkan, tapi bukan jaminan universal.
+- Konsekuensi: celah 2 (binary statis) TERBUKA KEMBALI di perangkat ini —
+  LD_PRELOAD tak berlaku untuk statis, dan supervisor tak bisa dipasang.
+- Mitigasi yang sudah jalan (`fake-run`, commit `2eacd33`): probe `svsp`
+  sebelum exec; gagal → dinamis/`sh`/`node` otomatis ke LD_PRELOAD; statis →
+  error jujur. Bukan penutup celah, tapi kegagalan yang anggun.
+
 ---
 
 ## 4. Rekomendasi
