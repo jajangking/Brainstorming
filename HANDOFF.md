@@ -2248,6 +2248,22 @@ lapis distro** yang saling menumpuk.
 | § | Simtom | Akar masalah | Fix |
 |---|---|---|---|
 | 48 | Node/Bun memanggil syscall **mentah** (libuv), shim `LD_PRELOAD` tak menyentuhnya → `mkdir("/usr/local/lib")` kena path **host** (tak ada di Android) → ENOENT | `fake-run` otomatis pilih `ldpreload` untuk biner dinamis; Node memang dinamis tapi butuh supervisor | `fake-run` memaksa `MODE=svsp` untuk `node*/bun/deno/uv/uvx/nodejs`; `alpine` (shell, `-c`, passthrough) memanggil `fake-run --svsp` |
+| 49 | fresh install tak punya `npm` sama sekali — `base_packages` cuma curl/bash/git + terminfo, jadi perbaikan §47/§48 tak bisa dipakai app mana pun | paket dasar belum memuat Node; `apk add nodejs npm` ~45 detik, jauh lebih lambat daripada pasang toolchain (~45 detik) yang sudah berjalan | `nodejs` + `npm` masuk `base_packages`; smoke check V6 di `verify_run` (`npm install -g is-number`) |
+
+### 41.1a Fresh install: apa yang sudah terverifikasi
+
+`bootstrap.sh` diuji dua kali ke base terisolasi (`$TMPDIR/freshtest*`),
+**bukan** ke `~/alpine-rootfs` yang sedang dipakai. Hasil:
+
+- `bootstrap.sh --base=...` rc=0, V1–V5 hijau (fresh container dari nol).
+- `apk add nodejs npm` → 98 MiB, 45 paket, ~45 detik.
+- `fake-run --svsp sh -lc 'npm install -g cowsay'` → sukses.
+- `fake-run --svsp sh -lc 'npm install -g 9router'` → `added 11 packages`, `9router --version` = `0.5.99`.
+
+Jadi §47/§48 **memang ikut terpasang dari nol** — keduanya ada di sumber
+(`svsp.c` dikompilasi, `fake-run`/`alpine` di-`install_atomic`), bukan
+patching manual pada wadah. Wrapper `npm` tidak pernah ikut terpasang
+(keduanya sudah dibuang, bukan bagian dari distro).
 | 47 | `lstat('/data')` → ENOENT, killings `npm install -g` juga setelah §48 | `passthrough()` di `svsp.c` punya `"/data/"` **dengan** garis miring, tapi **tidak** path persis `/data`; Node memanggil `lstat("/data")` sebagai komponen pertama `fs.realpathSync` | tambahkan padanan tanpa garis miring untuk `/data`, `/apex`, `/vendor`, `/product`, `/linkerconfig` |
 
 ### 41.1 Yang berubah

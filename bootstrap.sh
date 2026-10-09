@@ -215,19 +215,22 @@ runtime_libs() {
 # seperti runtime_libs.
 base_packages() {
     local missing=0 p
-    for p in curl bash git; do
+    for p in curl bash git nodejs npm; do
         [ -x "$BASE/usr/bin/$p" ] || [ -x "$BASE/bin/$p" ] || missing=1
     done
     [ -d "$BASE/usr/share/terminfo" ] || missing=1
     if [ "$missing" -eq 0 ]; then
-        log "paket dasar (curl bash git + terminfo) sudah ada — dipakai ulang"; return 0
+        log "paket dasar (curl bash git nodejs npm + terminfo) sudah ada — dipakai ulang"; return 0
     fi
     [ -x "$PREFIX/bin/fake-run" ] || die "fake-run belum terpasang (base_packages dipanggil sebelum install?)"
-    log "pasang paket dasar (curl bash git + terminfo) via apk wadah..."
+    log "pasang paket dasar (curl bash git nodejs npm + terminfo) via apk wadah..."
     # nama paket terminfo di Alpine 3.24: ncurses-terminfo-base (umum) +
     # ncurses-terminfo (256-color dkk). 'ncurses-base'/'ncurses-term' tak ada.
+    # nodejs+npm ikut dasar karena `npm install -g` adalah jalur paling sering
+    # dipakai app di dalam wadah (§48) dan pasang ulang saat itu perlu ~1 menit
+    # jaringan seluler — jauh lebih lambat daripada ~45 detik bersama toolchain.
     env -u LD_PRELOAD "$PREFIX/bin/fake-run" --base="$BASE" apk add curl bash git \
-        ncurses-terminfo-base ncurses-terminfo \
+        ncurses-terminfo-base ncurses-terminfo nodejs npm \
         || die "apk add paket dasar gagal"
 }
 
@@ -400,6 +403,19 @@ EOF
     [ -f "$base/usr/lib/libstdc++.so.6" ] \
         || die "libstdc++.so.6 tak ada di wadah — runtime_libs gagal?"
     echo "libstdc++.so.6 OK"
+
+    # V6 npm global (§47/§48). Dua-duanya perlu: mkdir prefix global BUTUH
+    # supervisor (Node memanggil syscall mentah), dan lstat("/data") TAK BOLEH
+    # di-rewrite jadi $BASE/data. Tanpa V6, `npm install -g <paket>` gagal
+    # ENOENT padahal semuanya benar — persis laporan device 2026-10-09.
+    if [ -x "$base/usr/bin/node" ] && [ -x "$base/usr/bin/npm" ]; then
+        echo "----- V6 npm -g (prefix global via supervisor) -----"
+        try_ok "V6 npm -g" 3 -- env -u LD_PRELOAD "$fr" --base="$base" --svsp \
+            sh -c 'cd "$HOME" && npm install -g is-number --no-audit --no-fund >/dev/null 2>&1 && npm ls -g --depth=0 >/dev/null'
+        echo "npm install -g OK"
+    else
+        echo "----- V6 npm -g dilewati: node/npm belum ada di wadah -----"
+    fi
 }
 
 # ------------------------------------------------- default port opencode

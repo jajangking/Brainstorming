@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§47 ==="
+info "=== matrix regresi §40-§49 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -229,6 +229,19 @@ if [ -f "$SELF_DIR/alpine" ] && grep -qF -- '--svsp --base=' "$SELF_DIR/alpine";
     pass "§48 alpine: shell wadah lewat --svsp"
 else
     fail "§48 alpine: shell wadah lewat --svsp" "alpine tak memanggil fake-run --svsp"
+fi
+
+# §49 node/npm ikut base_packages: tanpa itu fresh install tak punya npm sama
+# sekali, jadi `npm install -g` yang tervalidasi di §47 tak bisa dipakai.
+BS_SRC="$SELF_DIR/bootstrap.sh"
+if [ -f "$BS_SRC" ]; then
+    if grep -q 'nodejs npm' "$BS_SRC"; then
+        pass "§49 bootstrap: nodejs+npm ikut base_packages"
+    else
+        fail "§49 bootstrap: nodejs+npm ikut base_packages" "nodejs/npm tak ada di base_packages"
+    fi
+else
+    info "§49 dilewati: bootstrap.sh tak ditemukan di $SELF_DIR"
 fi
 
 # --- 9. pembersihan ----------------------------------------------------------
