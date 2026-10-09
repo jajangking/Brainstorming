@@ -2480,17 +2480,39 @@ added 556 packages in 41s
     web/node_modules         4 entri
 ```
 
-### 41.4g Yang saya pelajari (dan salah lagi)
+### 41.4g Yang saya pelajari (dan saya salah dua kali)
 
-Saya sempat menyelidiki nol yang sudah tertulis di `git log` repo target.
-Kegagalan itu bukan karena tak ada ide, tapi karena saya tidak membaca sumber
-yang tersedia. Kalau distro mandek, cek dulu **`git log` aplikasi yang
-melapor** — bukan hanya arsitektur distro. Upstream sering sudah punya
-jawabannya; di sini ternyata sudah 1 hari sebelum saya mulai.
+**Salah #1 — mengarang workaround tanpa membaca sumber.** Saya menyelidiki
+`faccessat2` berjam-jam (handler di child supervisor, `SIG_IGN`, stub) lalu
+tahu semuanya mustahil — sementara `git log` repo Hermes sudah punya jawabannya
+sejak sehari sebelumnya (`a50c4ba7c9`). Aturan: kalau distro mandek, cek
+duluan **`git log` aplikasi yang melapor**.
 
-§53 sendiri tetap valid sebagai perbaikan (anak statis di dalam shell tak
-lagi "kabur" untuk `newfstatat`), tapi klaim bahwa itu memperbaiki Hermes
-**salah** dan tak boleh diklaim lagi.
+**Salah #2 — hampir membongkar §53 karena alasan yang salah.** §53 tidak
+memperbaiki Hermes (itu memang benar), jadi saya menyimpulkan "percobaan gagal,
+buang saja". Kalau benar dibalik, ternyata **§51a ikut mati**:
+
+```
+busybox (DYNAMIC) ── shim  : /proc/net/if_inet6 → Permission denied
+busybox (DYNAMIC) ── svsp : /proc/net/if_inet6 → 158 byte
+```
+
+Snapshot `/proc/net/` (§51a) **hanya** bisa dipakai supervisor — shim tak
+menyentuh syscall mentah. Jadi **§53 adalah syarat §51a**.
+Prinsipnya: jangan menilai satu perubahan dari satu gejala. §53 "gagal" untuk
+Hermes, tapi menopang fitur yang sama sekali berbeda.
+
+§53 dipulihkan. Yang benar darinya: §53 memperbaiki (a) anak statis di shell
+dan (b) §51a. Yang bukan: klaim bahwa §53 memperbaiki Hermes.
+
+### 41.4h Addendum: `hermes` belum nyambung ke PATH
+
+Setelah `hermes-reinstall` sukses, programnya jalan tapi `hermes` tak bisa
+dipanggil dari `alpine` — tak ada satu pun file rc yang menambahkan
+`/root/.hermes/hermes-agent/.hermes/bin` ke `$PATH`. Penyebabnya: installer
+henti di tahap "app products or command publication failed" **sebelum**
+menuliskan PATH itu. Blok RC yang ditulis `alpine` (§ prompt/alias) belum
+memuat baris PATH Hermes.
 
 ### 41.5 Dua pendekatan yang gagal (agar tak diulang)
 

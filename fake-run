@@ -163,16 +163,20 @@ if [ "$MODE" = auto ]; then
     # /usr/local/lib". Node memang dinamis (ada PT_INTERP) tapi butuh
     # supervisor: di situlah path diterjemahkan di level syscall.
     #
-    # §53: shell (sh/bash/dash/ash) juga wajib supervisor. Awalnya shell
-    # dianggap aman di jalur shim karena libc-nya ter-interpose — TAPI begitu
-    # ia me-spawn anak STATIS (probe Go, lefthook, busybox--install penuh),
-    # anak itu mengabaikan LD_PRELOAD dan syscall-nya KABUR: rewrite tak
-    # terjadi, `newfstatat("/usr/bin/git")` jadi ENOENT padahal berkasnya ada.
-    # Gejala nyata: `npm ci` di repo Hermes memanggil `lefthook install`
-    # (biner Go statis) yang gagal LookPath "git: not found in $PATH", lalu
-    # installer gagal publish command `hermes`.
-    # Bukti A/B: probe statis yang sama -> rc 0 saat langsung, ENOENT saat
-    # di-exec oleh shell di jalur shim (--svsp -> rc 0 lagi).
+    # §53: shell (sh/bash/dash/ash) juga wajib supervisor. Dua alasan, keduanya
+    # nyata dan keduanya dibuktikan A/B di device:
+    #   (a) anak STATIS yang di-spawn shell (probe Go, lefthook) mengabaikan
+    #       LD_PRELOAD -> syscall-nya mentah -> `newfstatat("/usr/bin/git")`
+    #       ENOENT padahal berkasnya ada.
+    #   (b) §51a: /proc/net/* diblokir Android, dan fallback ke snapshot
+    #       $BASE/usr/local/share/fakeroot/procnet HANYA jalan di supervisor.
+    #       Shim tak bisa menyentuh syscall mentah, jadi lewat shim
+    #       `head -c1 /proc/net/if_inet6` tetap "Permission denied" —
+    #       terbukti saat §53 dicoba dibalik: shim FAIL, --svsp 158 byte.
+    #       (§51a tanpa §53 = snapshot tak pernah terpakai.)
+    # Catatan penting: §53 TIDAK memperbaiki installer Hermes — penyebab itu
+    # faccessat2 (batas kernel, §41.4f/§54). Yang bikin Go LookPath crash ada
+    # di binary Go itu sendiri, bukan di shell yang memanggilnya.
     if [ "$MODE" = ldpreload ]; then
         case "$(basename "$host")" in
             node|node[0-9]*|bun|deno|uv|uvx|nodejs)   MODE=svsp ;;
