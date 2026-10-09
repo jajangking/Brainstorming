@@ -2595,7 +2595,20 @@ Kode C_SOCK setengah-jadi SUDAH di-revert dari `svsp.c` + binary rebuild —
 `--no-daemon` tetap jalan untuk codex. Pelajaran: setengah implementasi di
 supervisor lebih berbahaya daripada tidak ada (EFAULT buta vs EACCES jujur).
 
-### 41.4m Addendum: `hermes` belum nyambung ke PATH
+### 41.4m §58 — penyimpanan internal HP (/sdcard, /storage)
+
+Laporan: app wadah tak bisa menyentuh memori internal HP (ENOENT).
+Dua lapis penyebab: (1) Termux belum diberi izin (`~/storage` tak ada —
+`termux-setup-storage` belum jalan), (2) `/sdcard` & `/storage` tak ada di
+daftar passthrough sehingga di-rewrite ke `$BASE/...` yang tak ada.
+Fix: keduanya masuk `passthrough()` (svsp.c) + `fk_host_prefix()`
+(libfakeroot.c), pola yang sama seperti `/data` (§47). Terverifikasi:
+`ls /sdcard` + tulis-baca-hapus dari wadah. Batas: file di sdcard tak bisa
+dieksekusi (sdcardfs noexec) — hanya untuk data; dan tanpa izin Android
+kernel tetap EACCES (kondisi device, bukan regresi — selftest melewati
+§58 bila `~/storage` tak ada di host).
+
+### 41.4n Addendum: `hermes` belum nyambung ke PATH
 
 Setelah `hermes-reinstall` sukses, programnya jalan tapi `hermes` tak bisa
 dipanggil dari `alpine` — tak ada satu pun file rc yang menambahkan

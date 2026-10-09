@@ -221,6 +221,12 @@ static int passthrough(const char *p) {
         || !strncmp(p, "/product/", 9) || !strcmp(p, "/product")
         || !strncmp(p, "/linkerconfig/", 14) || !strcmp(p, "/linkerconfig")
         || !strncmp(p, "/data/", 6) || !strcmp(p, "/data")
+        /* §58: penyimpanan internal HP. /sdcard & /storage hanya berguna
+         * bila Termux sudah diberi izin (termux-setup-storage); tanpa itu
+         * kernel tetap EACCES. Dipassthrough apa adanya (bukan di-rewrite)
+         * supaya app wadah membaca/menulis langsung ke sana. */
+        || !strncmp(p, "/sdcard/", 8) || !strcmp(p, "/sdcard")
+        || !strncmp(p, "/storage/", 9) || !strcmp(p, "/storage")
         || (baselen && strncmp(p, base, baselen) == 0);
 }
 
@@ -302,6 +308,7 @@ static int rewrite2(const char *in, char *out, size_t outsz, pid_t pid) {
 static int host_pass_prefix(const char *p) {
     static const char *pre[] = { "/system/", "/data/", "/dev/", "/proc/",
                                  "/sys/", "/apex/", "/vendor/", "/product/",
+                                 "/sdcard/", "/storage/",
                                  NULL };
     for (int i = 0; pre[i]; i++)
         if (strncmp(p, pre[i], strlen(pre[i])) == 0) return 1;

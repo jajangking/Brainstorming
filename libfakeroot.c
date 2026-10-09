@@ -167,6 +167,9 @@ static void fk_sigsys(int sig, siginfo_t *info, void *uctx) {    ucontext_t *uc 
  * karena di-rewrite ke $BASE/data/... (device-feedback ronde 2 butir 5). */
 static int fk_host_prefix(const char *p) {
     return !strncmp(p, "/data/", 6) || !strcmp(p, "/data")
+        /* §58: penyimpanan internal HP (butuh izin termux-setup-storage). */
+        || !strncmp(p, "/sdcard/", 8) || !strcmp(p, "/sdcard")
+        || !strncmp(p, "/storage/", 9) || !strcmp(p, "/storage")
         || !strncmp(p, "/system/", 8) || !strcmp(p, "/system")
         || !strncmp(p, "/apex/", 6)
         || !strncmp(p, "/vendor/", 8)

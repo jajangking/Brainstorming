@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§56 ==="
+info "=== matrix regresi §40-§58 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -344,6 +344,28 @@ if [ "$OUT" = "rc=1" ]; then
     pass "§56 ps wrapper: PID mati tetap gagal"
 else
     fail "§56 ps wrapper: PID mati tetap gagal" "out=$OUT"
+fi
+
+# §58 penyimpanan internal HP: /sdcard & /storage wajib passthrough (bukan
+# di-rewrite ke $BASE). Hanya bermakna bila Termux sudah diberi izin
+# (termux-setup-storage); tanpa izin kernel EACCES dan check ini gagal —
+# itu kondisi device, bukan regresi. Dilewati bila ~/storage tak ada di host.
+if [ -d "$HOME/storage" ]; then
+    OUT=$(bash "$FR" --svsp sh -c 'ls /sdcard >/dev/null 2>&1 && echo SD-OK' 2>&1)
+    if [ "$OUT" = "SD-OK" ]; then
+        pass "§58 svsp: /sdcard passthrough"
+    else
+        fail "§58 svsp: /sdcard passthrough" "out=$OUT"
+    fi
+    OUT=$(bash "$FR" --svsp sh -c 'echo "st58" > /sdcard/.selftest-58 && cat /sdcard/.selftest-58 && rm -f /sdcard/.selftest-58' 2>&1 | tail -1)
+    if [ "$OUT" = "st58" ]; then
+        pass "§58 svsp: tulis-baca /sdcard"
+    else
+        fail "§58 svsp: tulis-baca /sdcard" "out=$OUT"
+    fi
+    rm -f "$HOME/storage/.selftest-58" 2>/dev/null
+else
+    info "§58 dilewati: ~/storage tak ada (termux-setup-storage belum jalan)"
 fi
 
 # §52 lsof GNU WAJIB: busybox lsof mengabaikan -t dan -i sehingga
