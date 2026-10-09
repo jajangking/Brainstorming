@@ -170,6 +170,11 @@ static int fk_host_prefix(const char *p) {
         /* §58: penyimpanan internal HP (butuh izin termux-setup-storage). */
         || !strncmp(p, "/sdcard/", 8) || !strcmp(p, "/sdcard")
         || !strncmp(p, "/storage/", 9) || !strcmp(p, "/storage")
+        /* §60: mount Android lain (/system_ext WAJIB untuk resolve lib
+         * vendor oleh linker bionic; tanpa ini `am` mati CANNOT LINK). */
+        || !strncmp(p, "/system_ext/", 12) || !strcmp(p, "/system_ext")
+        || !strncmp(p, "/odm/", 5) || !strcmp(p, "/odm")
+        || !strncmp(p, "/oem/", 5) || !strcmp(p, "/oem")
         || !strncmp(p, "/system/", 8) || !strcmp(p, "/system")
         || !strncmp(p, "/apex/", 6)
         || !strncmp(p, "/vendor/", 8)
@@ -482,7 +487,15 @@ static int fk_needs_loader(const char *path) {
         size_t bl = strlen(fk_base);
         int patched = (strncmp(interp, fk_base, bl) == 0 &&
                        (interp[bl] == '/' || interp[bl] == '\0'));
-        return patched ? 0 : 1;                                 /* interp resolvable? polos; selain itu loader */
+        if (patched) return 0;
+        /* §59: INTERP milik HOST (bionic /system/bin/linker64, dsb — path yang
+         * resolvable di host) -> kernel host mengeksekusi polos; loader musl
+         * justru merusaknya (CANNOT LINK: memuat biner bionic). Hanya INTERP
+         * musl-stock (/lib/ld-musl-...) yang butuh loader patched. Tanpa ini
+         * tak satu pun perintah termux-* bisa jalan dari dalam wadah
+         * (device 2026-10-09: termux-battery-status mati). */
+        if (fk_host_prefix(interp)) return 0;
+        return 1;                                       /* interp stock musl -> loader */
     }
     close(fd);
     return 0;                                                   /* statik / tanpa PT_INTERP */
@@ -593,6 +606,25 @@ static char **fk_ensure_wadah_env(char *const envp[]) {
     return merged;
 }
 
+/* §59: salinan envp TANPA LD_PRELOAD/LD_LIBRARY_PATH untuk exec biner host.
+ * Loader bionic memuat apa pun yang ditunjuk LD_PRELOAD — shim musl di situ
+ * = CANNOT LINK; LD_LIBRARY_PATH musl ($BASE/lib:...) bisa meracuni pencarian
+ * libc biner host. Biner Termux tak butuh keduanya (pakai RUNPATH/linker
+ * config). Hanya array-nya yang di-malloc (string dipinjam); caller free. */
+static char **fk_strip_host_env(char *const *e) {
+    int n = 0; while (e && e[n]) n++;
+    char **o = malloc(((size_t)n + 1) * sizeof(char *));
+    if (!o) return (char **)e;
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        if (!strncmp(e[i], "LD_PRELOAD=", 11) || !strncmp(e[i], "LD_LIBRARY_PATH=", 16))
+            continue;
+        o[m++] = e[i];
+    }
+    o[m] = NULL;
+    return o;
+}
+
 /* §25 (/proc/self/exe saat jalan via loader):
  * Bila program dijalankan sebagai "ld-musl-patched.so.1 /path/prog args...",
  * maka /proc/self/exe milik proses = LOADER, bukan prog. Bun/OpenCode memakai
@@ -699,6 +731,33 @@ static char **fk_fix_loader_argv(const char *hostpath, char *const argv[]) {
 static int fk_exec_one(const char *hostpath, char *const argv[], char *const envp[]) {
     char **menv = fk_ensure_wadah_env(envp);
     char *const *e2 = (char *const *)menv;
+    /* §59: target HOST (di luar base, prefix host) dieksekusi POLOS oleh kernel
+     * host — tanpa loader musl (CANNOT LINK, lihat fk_needs_loader) dan tanpa
+     * preload musl di env. Berlaku juga untuk biner host STATIS (tanpa
+     * PT_INTERP) yang fk_needs_loader lewatkan: dicek prefix-nya di sini. */
+    {
+        size_t hbl = strlen(fk_base);
+        if (strncmp(hostpath, fk_base, hbl) != 0 && fk_host_prefix(hostpath)) {
+            char **henv = fk_strip_host_env(e2);
+            char **fx = fk_fix_loader_argv(hostpath, argv);
+            int hr;
+            if (fx) {
+                NEXT(execve);
+                hr = CALL(execve, hostpath, fx, henv);
+                free(fx);
+            } else {
+                int sr = fk_try_shebang_exec(hostpath, argv, henv);
+                if (sr != -2) {
+                    if (henv != (char **)e2) free(henv);
+                    return sr;
+                }
+                NEXT(execve);
+                hr = CALL(execve, hostpath, argv, henv);
+            }
+            if (henv != (char **)e2) free(henv);
+            return hr;
+        }
+    }
     if (fk_needs_loader(hostpath)) {
         const char *loader = fk_loader_path();
         int n = 0;

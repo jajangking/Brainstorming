@@ -227,6 +227,12 @@ static int passthrough(const char *p) {
          * supaya app wadah membaca/menulis langsung ke sana. */
         || !strncmp(p, "/sdcard/", 8) || !strcmp(p, "/sdcard")
         || !strncmp(p, "/storage/", 9) || !strcmp(p, "/storage")
+        /* §60: mount Android lain. /system_ext WAJIB: linker bionic me-resolve
+         * lib vendor (mis. libtranlog.so untuk app_process) lewat sana;
+         * tanpa ini `am` (termux-api) mati CANNOT LINK di wadah. */
+        || !strncmp(p, "/system_ext/", 12) || !strcmp(p, "/system_ext")
+        || !strncmp(p, "/odm/", 5) || !strcmp(p, "/odm")
+        || !strncmp(p, "/oem/", 5) || !strcmp(p, "/oem")
         || (baselen && strncmp(p, base, baselen) == 0);
 }
 
@@ -309,6 +315,7 @@ static int host_pass_prefix(const char *p) {
     static const char *pre[] = { "/system/", "/data/", "/dev/", "/proc/",
                                  "/sys/", "/apex/", "/vendor/", "/product/",
                                  "/sdcard/", "/storage/",
+                                 "/system_ext/", "/odm/", "/oem/",
                                  NULL };
     for (int i = 0; pre[i]; i++)
         if (strncmp(p, pre[i], strlen(pre[i])) == 0) return 1;

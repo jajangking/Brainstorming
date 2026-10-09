@@ -2608,7 +2608,34 @@ dieksekusi (sdcardfs noexec) — hanya untuk data; dan tanpa izin Android
 kernel tetap EACCES (kondisi device, bukan regresi — selftest melewati
 §58 bila `~/storage` tak ada di host).
 
-### 41.4n Addendum: `hermes` belum nyambung ke PATH
+### 41.4n §59–§60 — biner host bisa dieksekusi + /system_ext (Termux:API)
+
+Laporan: perintah `termux-*` (Termux:API) mati dari wadah.
+Dua lapis, keduanya di luar dugaan awal:
+
+**§59 — shim membungkus biner bionic dengan loader musl.** `fk_needs_loader`
+mengembalikan 1 untuk SEMUA ELF dinamis ber-INTERP non-base, termasuk bionic
+(`/system/bin/linker64`) → `CANNOT LINK`. Fix: INTERP host = exec polos +
+env tanpa `LD_PRELOAD`/`LD_LIBRARY_PATH` musl (`fk_strip_host_env`). Berlaku
+juga untuk biner host statis (tanpa INTERP) yang lolos dari deteksi loader.
+Bukti: `termux-battery-status` yang tadinya CANNOT LINK kini rantai penuhnya
+jalan (sh → termux-api-broadcast → am → app_process).
+
+**§60 — `/system_ext` tak ada di passthrough.** Linker bionic me-resolve
+`libtranlog.so` (butuh `app_process`) lewat `/system_ext/lib64` — terbukti
+via strace host. Di wadah path itu di-rewrite ke `$BASE/system_ext` (tak
+ada) → CANNOT LINK. Fix: `/system_ext`, `/odm`, `/oem` masuk ketiga daftar
+(svsp passthrough, host_pass_prefix, shim fk_host_prefix). Pelajaran:
+daftar mount Android harus lengkap; yang tak ada = di-rewrite = rusak.
+
+**Belum selesai: round-trip API.** Broadcast terkirim (`am` exit 0) tapi app
+tak pernah merespons; `app_process` di wadah exit 0 tanpa output/tanpa
+menyentuh binder (host membuka `/dev/binder`). Akarnya belum ketahuan —
+bukan env (biseksi `ANDROID_*` nihil), bukan shim (tanpa shim pun sama),
+bukan supervisor stat (probe OK). Terbuka untuk lain waktu; `--no-daemon`
+dan pemakaian non-API tak terpengaruh.
+
+### 41.4o Addendum: `hermes` belum nyambung ke PATH
 
 Setelah `hermes-reinstall` sukses, programnya jalan tapi `hermes` tak bisa
 dipanggil dari `alpine` — tak ada satu pun file rc yang menambahkan
