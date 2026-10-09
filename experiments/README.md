@@ -11,6 +11,3 @@ utama. Disimpan sebagai catatan cara eksplorasi, bukan kode produksi.
 
 Kalau suatu saat eksperimen ini dipakai serius, pindahkan ke root dan sebut
 di `HANDOFF.md`.
-
-Kalau suatu saat eksperimen ini dipakai serius, pindahkan ke root dan sebut
-di `HANDOFF.md`.
