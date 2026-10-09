@@ -61,6 +61,8 @@ CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
 # Skrip kita di DALAM wadah (bukan konten user — tetap dibersihkan meski
 # --keep-rootfs, karena tanpa fake-run keduanya tak berguna).
 INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine")
+# Direktori yang kita buat sendiri (sisa registry launcher dll).
+DIRS=("$PREFIX/share/brainstorming")
 
 echo
 info "Hapus Brainstorming dari Termux..."
@@ -122,6 +124,20 @@ for f in "${INSIDE[@]}"; do do_rm "$f" "dalam wadah"; done
 
 # 3) cache unduhan
 for f in "${CACHES[@]}"; do do_rm "$f" "cache"; done
+
+# 3b) direktori milik kita (hanya bila kosong — aman, tak menyentuh user)
+for d in "${DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            dim "akan hapus [dir kosong]: $d"
+        else
+            rmdir "$d" 2>/dev/null && log "Hapus [dir kosong]: $d"
+        fi
+    elif [ "$DRY_RUN" -eq 0 ]; then
+        warn "tak kosong, dibiarkan: $d ($(ls -A "$d" | wc -l) entri)"
+    fi
+done
 
 # 4) wadah
 if [ "$KEEP_ROOTFS" -eq 0 ]; then
