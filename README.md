@@ -142,6 +142,7 @@ cd ~/Brainstorming && ./uninstall.sh
 | File | Isi |
 |---|---|
 | `HANDOFF.md` | Status mutakhir, checklist, gotchas kritis, resep build |
+| `HERMES.md` | Panduan pengguna Hermes Agent (install, pakai, error) |
 | `BRAINSTORM.md` | Peta kemungkinan/mustahil + argumen teknis |
 | `ARENA-REPLY.md` | Verdict review + hasil uji device |
 | `device-feedback/` | Log uji device per ronde (ronde 19 = Hermes Agent sukses) |
