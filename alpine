@@ -105,6 +105,11 @@ if [ $# -eq 0 ]; then
         printf '%s\n' 'PS1="\[\033[38;2;0;170;0m\]\[\033[1;38;2;0;255;0m\]alpine\[\033[0m\]\[\033[38;2;0;170;0m\]:\[\033[38;2;255;135;0m\]\w\[\033[0m\]\[\033[1;38;2;0;255;0m\]❯\[\033[0m\] "'
         echo 'alias la="apk list --installed"'
         echo 'export PAGER=less'
+        # §54b: hermes terinstall di ~/.hermes tapi installer-nya berhenti
+        # SEBELUM menuliskan PATH (tahap "command publication" tak pernah
+        # jalan karena build gagal). Tanpa baris ini `hermes` = command not
+        # found di setiap shell baru. Idempoten: blok ditulis utuh tiap start.
+        echo 'case ":$PATH:" in *:/root/.hermes/hermes-agent/.hermes/bin:*) :;; *) export PATH="$PATH:/root/.hermes/hermes-agent/.hermes/bin";; esac'
         echo '# <<< FAKE_ALPINE_RC <<<'
     } > "$_blk" 2>/dev/null || true
 

@@ -376,6 +376,14 @@ install() {
     # HANDOFF §41.4f. Host-side saja; tak ada padanannya di dalam wadah.
     [ -f "$SRC/hermes-reinstall" ] && \
         install_atomic "$SRC/hermes-reinstall" "$PREFIX/bin/hermes-reinstall"
+    [ -f "$SRC/hermes-nodeps-driver.py" ] && \
+        install_atomic "$SRC/hermes-nodeps-driver.py" "$PREFIX/bin/hermes-nodeps-driver.py" 0644
+    # §55: build web_dist Hermes tahap terpisah (web.mjs resmi segfault bila
+    # typecheck+vite satu proses). Host-side + file di dalam wadah via /tmp.
+    [ -f "$SRC/hermes-web-build" ] && \
+        install_atomic "$SRC/hermes-web-build" "$PREFIX/bin/hermes-web-build"
+    [ -f "$SRC/web-split.mjs" ] && \
+        install_atomic "$SRC/web-split.mjs" "$PREFIX/bin/web-split.mjs" 0644
     # §51: preload Node anti-crash netlink. fake-run menyuntik NODE_OPTIONS
     # --require ke path ini bila berkasnya ada — jadi pemasangannya wajib di install.
     if [ -f "$SRC/node-wrap" ]; then

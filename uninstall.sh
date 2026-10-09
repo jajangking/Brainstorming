@@ -54,7 +54,8 @@ done
 # --- kumpulkan target lebih dulu, supaya bisa diringkas & dikonfirmasi ------
 # Alat di host
 TOOLS=("$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$PREFIX/bin/alpine"
-       "$PREFIX/bin/app" "$PREFIX/bin/hermes-reinstall" "$HOME/libfakeroot.so")
+       "$PREFIX/bin/app" "$PREFIX/bin/hermes-reinstall" "$PREFIX/bin/hermes-web-build"
+       "$PREFIX/bin/hermes-nodeps-driver.py" "$PREFIX/bin/web-split.mjs" "$HOME/libfakeroot.so")
 # Cache unduhan
 CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
         "$HOME/linux-headers-cache.apk")

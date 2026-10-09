@@ -2505,7 +2505,53 @@ Hermes, tapi menopang fitur yang sama sekali berbeda.
 §53 dipulihkan. Yang benar darinya: §53 memperbaiki (a) anak statis di shell
 dan (b) §51a. Yang bukan: klaim bahwa §53 memperbaiki Hermes.
 
-### 41.4h Addendum: `hermes` belum nyambung ke PATH
+### 41.4h §55 — web.mjs segfault bila typecheck+vite satu proses
+
+Setelah node-deps beres, tail gagal di langkah berikut: TUI build OK (esbuild,
+913ms — bukti biner Go statis BISA jalan; hanya path `LookPath`/`eaccess` yang
+mati), tapi `web.mjs` mati SIGSEGV (`si_addr=NULL`).
+
+Terisolasi lewat 12+ eksperimen A/B (strace -f, node --version per fase):
+
+| typecheck | vite | wrapper | hasil |
+|---|---|---|---|
+| ✓ | – | – | OK ~30 dtk |
+| – | ✓ kosong | – | OK |
+| – | ✓ asli | – | OK ~14 dtk |
+| ✓ | ✓ kosong | – | OK 10,5 mnt |
+| ✓ | ✓ asli | withProduct | MATI (titik acak) |
+
+Pola: tiap fase sendiri hijau berulang; gabungan dalam satu proses mati di
+titik acak (saat transforming, sesudah mkdir scratch, <10 dtk tanpa output).
+Bukan bug deterministik — kombinasi tsc + Rolldown-native dalam satu V8 heap
+di Android tidak stabil ( thread latar native; korban selalu main thread
+dengan NULL-deref dan nol syscall sebelumnya).
+
+Solusi: PECAH FASE. `hermes-web-build` (baru) menjalankan `web-split.mjs`
+dua proses (typecheck, lalu vite+publish+record), lalu gate freshness
+"✓ Web UI is up to date" lolos dan tail skip rebuild. Terverifikasi:
+typecheck status 0, vite 13,53 dtk, `index.html` terbit, gate `true`.
+
+Catatan: TUI (esbuild Go) membuktikan batas Go yang tepat — bukan "Go tak
+bisa di Android", melainkan "Go yang memanggil access-check (faccessat2)
+tak bisa". Dokumentasi §41.4f dikoreksi ke arah ini.
+
+### 41.4i §54b — receipt key: env yang beda, npm yang beda
+
+`hermes-reinstall` pertama memakai `npm ci` mentah (tak menulis receipt) lalu
+versi kedua memanggil `node-deps.mjs` tapi dengan PATH rakitan sendiri —
+keduanya gagal dengan cara yang sama: tail Hermes tetap install ulang lalu
+crash lefthook. Akarnya: receipt di-key dari **npm yang ter-resolve + env**.
+PATH rakitan (`node-bin:npm-bin`) me-resolve npm 11.19.0, activation env
+Hermes me-resolve 12.0.2 (atau sebaliknya) — key beda, receipt tak cocok,
+`npm ci` jalan terus. Dan setiap run gagal **menghapus** receipt dulu
+(`rmSync` di awal `prepareNodeDependencies`), jadi lingkaran tak pernah keluar.
+
+Fix: `hermes-reinstall` memakai venv python + `activation_environment`
+Hermes (cara `venv_sync`), lewat driver `hermes-nodeps-driver.py`. Key
+identik dengan yang dihitung tail -> `reusing completed install`.
+
+### 41.4j Addendum: `hermes` belum nyambung ke PATH
 
 Setelah `hermes-reinstall` sukses, programnya jalan tapi `hermes` tak bisa
 dipanggil dari `alpine` — tak ada satu pun file rc yang menambahkan

@@ -1,0 +1,65 @@
+#!/bin/sh
+# Build web_dist Hermes Agent TAHAP TERPISAH di dalam wadah Alpine.
+#
+# MASALAH (§55, device 2026-10-09): scripts/build/web.mjs resmi menjalankan
+# typecheck + vite build dalam SATU proses Node dan mati SIGSEGV
+# (si_addr=NULL) di device ini. Terisolasi lewat 12+ eksperimen A/B:
+#   - typecheck saja          -> OK (status 0, ~30 dtk)
+#   - vite saja (public kosong maupun asli) -> OK (~14 dtk)
+#   - typecheck + vite satu proses (replika persis) -> OK SEKALI (10,5 mnt)
+#   - web.mjs resmi / buildWeb() penuh -> MATI (7x, titik acak: <10 dtk
+#     tanpa output, saat transforming, sesudah mkdir scratch)
+# Kombinasi tsc + Rolldown-native dalam satu V8 heap di Android tidak stabil;
+# bukan bug yang bisa di-patch (native code), jadi solusinya PECAH FASE.
+#
+# Skrip ini melakukan LANGKAH YANG SAMA dalam DUA proses (keduanya hijau
+# berulang), lalu publish + recordProduct agar gate freshness Hermes
+# ("✓ Web UI is up to date") lolos dan tail installer skip rebuild:
+#   1. node web-split.mjs typecheck   (harus status 0)
+#   2. node web-split.mjs vite        (build + publish + record)
+#
+# Pakai:  hermes-web-build            (host Termux; butuh node-deps sudah ada)
+# Keluar: hermes_cli/web_dist + receipt, siap untuk `hermes update`.
+
+set -u
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+FAKE_RUN="$PREFIX/bin/fake-run"
+BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+SRC="$(cd "$(dirname "$0")" && pwd)"
+
+die() { printf '\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
+log() { printf '\033[1;32m[+] %s\033[0m\n' "$*"; }
+
+[ -x "$FAKE_RUN" ] || die "fake-run tak ada: $FAKE_RUN"
+[ -f "$SRC/web-split.mjs" ] || die "web-split.mjs tak ada di $SRC"
+[ -d "$BASE/root/.hermes/hermes-agent" ] || die "repo Hermes tak ada (jalankan installer dulu?)"
+
+cp "$SRC/web-split.mjs" "$BASE/tmp/web-split.mjs" 2>/dev/null \
+    || die "tak bisa salin driver ke $BASE/tmp/"
+
+# Node Hermes hanya jalan DI DALAM wadah. Heap cap 6144 + preset di env agar
+# web.mjs-style re-exec tak terjadi; tiap fase prosesnya sendiri.
+run_phase() {
+    env -u LD_PRELOAD "$FAKE_RUN" --svsp --base="$BASE" /bin/sh -c '
+        HROOT=/root/.hermes
+        ND=$(ls -d $HROOT/tools/node-*/bin 2>/dev/null | head -1)
+        [ -x "$ND/node" ] || { echo "node Hermes tak ada" >&2; exit 1; }
+        cd $HROOT/hermes-agent || exit 1
+        export NODE_OPTIONS="$NODE_OPTIONS --max-old-space-size=6144"
+        exec "$ND/node" /tmp/web-split.mjs "$1"
+    ' _ "$1" 2>&1 | tail -6
+}
+
+log "fase 1/2: typecheck..."
+run_phase typecheck
+log "fase 2/2: vite build + publish + record..."
+run_phase vite
+
+log "verifikasi gate freshness:"
+env -u LD_PRELOAD "$FAKE_RUN" --svsp --base="$BASE" /bin/sh -c '
+    HROOT=/root/.hermes
+    ND=$(ls -d $HROOT/tools/node-*/bin | head -1)
+    "$ND/node" scripts/build/freshness.mjs --source /root/.hermes/hermes-agent \
+        --product web --out /root/.hermes/hermes-agent/hermes_cli/web_dist
+' _ 2>&1 | tail -1
+log "selesai. Lanjut:  hermes update   (tail skip rebuild web)"

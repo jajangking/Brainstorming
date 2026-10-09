@@ -37,6 +37,7 @@
 #         hermes-reinstall --keep      (tanpa restore .git, untuk debug)
 
 set -u
+SRC="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 FAKE_RUN="$PREFIX/bin/fake-run"
 BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
@@ -77,29 +78,21 @@ fi
 log "install: node-deps.mjs --reuse --workspace ui-tui --workspace web"
 log "(butuh 1-2 menit; menulis receipt agar installer --reuse bisa skip)"
 
-# Di DALAM wadah: PATH diawali tool Hermes supaya npmCommand() di
-# node-deps.mjs menemukan npm 12.x (bukan npm 11.x bawaan wadah yang ditolak
-# engine-strict). env -i di fake-run membuang PATH host, jadi PATH harus
-# disetel di sini, di dalam shell wadah.
+# Di DALAM wadah: pakai venv python + activation env Hermes (cara yang sama
+# dipakai venv_sync auto-repair), BUKAN PATH rakitan sendiri. Alasannya:
+# receipt node-deps.mjs di-key dari npm yang ter-resolve DAN env (npm_config_*
+# ikut hash). Kalau env kita beda dari env tail Hermes, key beda -> receipt
+# tak pernah cocok -> npm ci jalan terus -> lefthook crash terus (device
+# 2026-10-09: receipt "ADA" tapi tail tetap install ulang).
+# env -i di fake-run membuang PATH host, jadi semuanya disetel di sini.
+# Driver disalin ke /tmp wadah (di luar repo, tak mengotori git status).
+cp "$SRC/hermes-nodeps-driver.py" "$BASE/tmp/hermes-nodeps-driver.py" 2>/dev/null \
+    || die "tak bisa salin driver ke $BASE/tmp/"
 env -u LD_PRELOAD "$FAKE_RUN" --svsp --base="$BASE" /bin/sh -c '
     HROOT=/root/.hermes
-    ND=$(ls -d "$HROOT"/tools/node-*/bin 2>/dev/null | head -1)
-    NP=$(ls -d "$HROOT"/tools/npm-*/bin 2>/dev/null | head -1)
-    [ -n "$ND" ] && [ -n "$NP" ] || { echo "tools Hermes tak ada di wadah" >&2; exit 1; }
-    export PATH="$ND:$NP:$PATH"
-    echo "    npm    : $($ND/node --version 2>/dev/null | head -1) / $(node "$NP/../lib/node_modules/npm/bin/npm-cli.js" --version 2>/dev/null | head -1)"
-    cd "$HROOT/hermes-agent" || exit 1
-    if [ -f scripts/build/node-deps.mjs ]; then
-        exec "$ND/node" scripts/build/node-deps.mjs \
-            --source "$HROOT/hermes-agent" \
-            --reuse --workspace ui-tui --workspace web
-    else
-        # Hermes lama tanpa node-deps.mjs: npm ci mentah (tanpa receipt).
-        exec "$ND/node" "$NP/../lib/node_modules/npm/bin/npm-cli.js" ci \
-            --no-audit --no-fund --include=dev --include=optional \
-            --include-workspace-root=true --workspace ui-tui --workspace web \
-            --progress=true
-    fi
+    V=$(ls -d $HROOT/installs/*/environments/*/venv/bin/python 2>/dev/null | head -1)
+    [ -x "$V" ] || { echo "venv python Hermes tak ada" >&2; exit 1; }
+    exec "$V" -I -S /tmp/hermes-nodeps-driver.py 2>&1 | tail -8
 '
 RC=$?
 
