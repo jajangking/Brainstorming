@@ -171,7 +171,26 @@ setup_passthrough() {
     link "/dev/urandom" "/dev/urandom"
     link "/dev/zero" "/dev/zero"
     mkdir -p "$BASE/root" "$BASE/tmp"
+    procnet_snapshot
     log "passthrough /dev /proc /sys + root/tmp siap"
+}
+
+# §51: SELURUH /proc/net/ EACCES di Termux (batas kernel Android — terbukti
+# juga di host, bukan efek wadah: /proc/net/{tcp,route,dev,if_inet6}). App musl
+# yang memakai getifaddrs() berakhir EACCES dan gagal.
+# Shim + supervisor Falling back ke salinan statis di
+# $BASE/usr/local/share/fakeroot/procnet saat host menolak. Isi HANYA loopback:
+# cukup untuk parsing, tidak membocorkan data jaringan host.
+# Catatan: Node/libuv modern memakai NETLINK_ROUTE (bukan /proc/net), dan
+# netlink memblokir di Android — jadi 9router/Node tetap perlu workaround
+# yang dijelaskan di HANDOFF §42.
+procnet_snapshot() {
+    local d="$BASE/usr/local/share/fakeroot/procnet"
+    mkdir -p "$d"
+    # satu entri ::1/128 (loopback) — format /proc/net/if_inet6
+    [ -s "$d/if_inet6" ] || printf '%s\n' \
+'00000000000000000000000000000001 01 80 00000000000000000000000000000001 80 00000000000000000000000000000000 80 0000000000000000 00000000 00 00000000 01000000' \
+        > "$d/if_inet6"
 }
 
 # ------------------------------------------------------------- DNS wadah
@@ -215,22 +234,28 @@ runtime_libs() {
 # seperti runtime_libs.
 base_packages() {
     local missing=0 p
-    for p in curl bash git nodejs npm; do
+    for p in curl bash git nodejs npm lsof; do
         [ -x "$BASE/usr/bin/$p" ] || [ -x "$BASE/bin/$p" ] || missing=1
     done
     [ -d "$BASE/usr/share/terminfo" ] || missing=1
     if [ "$missing" -eq 0 ]; then
-        log "paket dasar (curl bash git nodejs npm + terminfo) sudah ada — dipakai ulang"; return 0
+        log "paket dasar (curl bash git nodejs npm lsof + terminfo) sudah ada — dipakai ulang"; return 0
     fi
     [ -x "$PREFIX/bin/fake-run" ] || die "fake-run belum terpasang (base_packages dipanggil sebelum install?)"
-    log "pasang paket dasar (curl bash git nodejs npm + terminfo) via apk wadah..."
+    log "pasang paket dasar (curl bash git nodejs npm lsof + terminfo) via apk wadah..."
     # nama paket terminfo di Alpine 3.24: ncurses-terminfo-base (umum) +
     # ncurses-terminfo (256-color dkk). 'ncurses-base'/'ncurses-term' tak ada.
     # nodejs+npm ikut dasar karena `npm install -g` adalah jalur paling sering
     # dipakai app di dalam wadah (§48) dan pasang ulang saat itu perlu ~1 menit
     # jaringan seluler — jauh lebih lambat daripada ~45 detik bersama toolchain.
+    # lsof (GNU, bukan busybox applet) wajib: busybox lsof mengabaikan flag -t
+    # dan -i sehingga `lsof -ti:PORT` mengembalikan BARIS PENUH, bukan PID.
+    # App yang parse kolom ke-2 (9router killProcessOnPort) lalu memanggil
+    # `kill -9 <baris>` yang invalid — selalu gagal diam-diam, dan app
+# punyanya pernah salahbunuh proses lain (device 2026-10-09).
+    # pernah salahbunuh proses lain (device 2026-10-09).
     env -u LD_PRELOAD "$PREFIX/bin/fake-run" --base="$BASE" apk add curl bash git \
-        ncurses-terminfo-base ncurses-terminfo nodejs npm \
+        ncurses-terminfo-base ncurses-terminfo nodejs npm lsof \
         || die "apk add paket dasar gagal"
 }
 
@@ -346,6 +371,12 @@ install() {
     # dieksekusi dari dalam wadah, jadi beri petunjuk alih-alih "not found".
     [ -f "$SRC/alpine-in-container" ] && \
         install_atomic "$SRC/alpine-in-container" "$BASE/usr/local/bin/alpine"
+    # §51: preload Node anti-crash netlink. fake-run menyuntik NODE_OPTIONS
+    # --require ke path ini bila berkasnya ada — jadi pemasangannya wajib di install.
+    if [ -f "$SRC/node-wrap" ]; then
+        mkdir -p "$BASE/usr/local/share/fakeroot"
+        install_atomic "$SRC/node-wrap" "$BASE/usr/local/share/fakeroot/node-netlink-safe.js" 0644
+    fi
     log "terpasang: $PREFIX/bin/fake-run, $PREFIX/bin/svsp, $PREFIX/bin/alpine, ~/libfakeroot.so"
     [ -f "$PREFIX/bin/app" ] && log "daftar aplikasi: app (juga di dalam wadah: /usr/local/bin/app)"
 }

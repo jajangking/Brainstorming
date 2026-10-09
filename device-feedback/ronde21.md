@@ -101,6 +101,64 @@ dipulihkan → 0 FAIL.
   Node me-realpath-kan modul utama. Itu konsekuensi fake-chroot (bukan chroot
   sungguhan), bukan kebocoran yang perlu dikoreksi.
 
+## Ronde 23 sisipan — 9router sampai dashboard hidup (§51/§52)
+
+Keluhan awal: `9router` selalu `[Process completed (signal 9)]`. Empat bug
+bertumpuk. Yang penting dicatat: **gejala sama, akar sama sekali berbeda.**
+
+### §52 — `busybox lsof` mengabaikan `-t` dan `-i`
+
+```
+$ lsof -ti:49374                     # port TIDAK dipakai
+18560	/data/.../bash	0	/dev/null    # ← baris penuh, bukan PID
+```
+
+App seperti 9router (`killProcessOnPort`) membaca output itu, ambil `parts[0]`
+sebagai PID, lalu `kill -9 "18560\t..."` → argumen invalid → gagal diam-diam.
+Karena `lsof -i` juga diabaikan, **selalu** dapat baris, jadi jalur ini selalu
+mengeksekusi kode yang tak pernah berhasil.
+
+### §51b — Node/libuv + NETLINK_ROUTE diblokir Android
+
+```
+SystemError [ERR_SYSTEM_ERROR]: uv_interface_addresses returned Unknown system error 13
+    at getLanIp (…/9router/cli.js:114:41)
+    at startServer (…/9router/cli.js:620:19)
+```
+
+Akar sebenarnya ketemu lewat probe C (`socket`/`bind`/`sendto`/`getifaddrs`):
+
+```
+socket(AF_NETLINK)  = 3   OK
+bind(AF_NETLINK)    = -1  EACCES     ← juga di HOST Termux!
+sendto(RTM_GETLINK) = -1  EACCES     ← juga di HOST Termux!
+getifaddrs()        = -1  EACCES
+```
+
+Jadi **batas kernel Android**, bukan efek wadah — dan bukan bisa diperbaiki
+shim/svsp karena Node memanggil syscall mentah. Fix: preload yang membungkus
+`os.networkInterfaces()` dengan fallback loopback (konservatif, tak mengarang
+alamat LAN).
+
+### Jebakan investigasi
+
+- `strace` tanpa `-f` **tidak melihat** apa yang dilakukan proses anak svsp;
+  dengan `-f` baru kelihatan bahwa yang EACCES adalah `sendto` netlink.
+- `ps aux` di dalam wadah juga bermasalah: `busybox ps` cuma 4 kolom
+  (`PID USER TIME COMMAND`), sedangkan 9router mengasumsikan format GNU 11
+  kolom. Ini sempat membuat saya menyimpulkan 9router "menembak PID sendiri".
+  Kenyataannya: `/usr/bin/ls` memang tidak ada (bisanya di `/bin`).
+  Diverifikasi ulang dengan audit 333 file: 0 mismatch.
+- `lsof` GNU sempat hilang setelah `apk add` (`/usr/bin` jadi tak terbaca dari
+  host selama satu waktu) — sudah dipulihkan.
+
+### Verifikasi
+
+```
+alpine -c '9router --skip-update -p 20128'   → dashboard HTTP 200
+./selftest                                     → 0 FAIL (matrix §40–§52)
+```
+
 ## Jejak sampingan
 
 - `9router` butuh satu kali `npm install -g` (~50–60 detik di jaringan seluler),

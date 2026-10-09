@@ -2331,7 +2331,46 @@ mentah (Bun/Zig) tak gagal. `FAKE_VIEW=container` memulihkan tampilan wadah.
   ada **sebelum §50** (dibuktikan A/B ke HEAD), bukan regresi. `test -x` pada
   file biasa (`bin/node`) jalan. Jadi jangan dipakai sebagai check §50.
 
-### 41.4 Dua pendekatan yang gagal (agar tak diulang)
+### 41.4 §51–§52 — 9router dari nol sampai dashboard hidup (2026-10-09)
+
+Keluhan: `9router` di dalam wadah selalu mati dengan
+`[Process completed (signal 9)]`. Biaa ini butuh **empat** causative bug
+bertumpuk, dan hanya dua yang bisa diperbaiki di distro.
+
+| § | Gejala | Akar masalah | Fix |
+|---|---|---|---|
+| 52 | app diam-diam gagal melakukan `kill -9` dan kadang menyalahbunuh proses | `busybox lsof` **mengabaikan flag `-t` dan `-i`**: `lsof -ti:PORT` mengembalikan baris penuh (`PID\tcmd\tfd\tname`), bukan PID. 9router parse kolom ke-2 = nama proses, lalu `kill -9 <baris>` invalid → gagal diam-diam | `lsof` GNU masuk `base_packages` |
+| 51b | `os.networkInterfaces()` melempar `ERR_SYSTEM_ERROR` errno 13 → 9router crash di `getLanIp()`, dashboard tak pernah tampil | Node/libuv ambil daftar interface lewat **NETLINK_ROUTE** (`socket(AF_NETLINK)` + `RTM_GETLINK`). Android memblokir `bind`/`sendto` netlink dengan EACCES — **terbukti juga di host Termux**, jadi batas kernel, bukan efek wadah | preload `node-wrap` → `NODE_OPTIONS=--require`, membungkus `os.networkInterfaces()` dengan fallback loopback |
+| 51a | `getifaddrs()` (musl) gagal `EACCES` untuk app statis/dinamis non-Node | **seluruh** `/proc/net/` EACCES di Termux (juga di host) | shim + supervisor fallback ke snapshot `$BASE/usr/local/share/fakeroot/procnet` (loopback saja) |
+| — | update check macet di "Checking for updates..." | `https.get` ke registry **berhasil** (280 ms) — spinner itu hanya cosmetic; proses sebenarnya mati karena 3 bug di atas | ikut hilang begitu §51/§52 beres |
+
+### 41.4a Verifikasi
+
+```
+$ alpine -c '9router --skip-update -p 20128'
+========================================
+  Choose Interface (v0.5.99)
+  🚀 Server: http://localhost:20128
+========================================
+
+$ curl -L http://127.0.0.1:20128/dashboard
+dashboard HTTP 200
+```
+
+`./selftest` → **0 FAIL** (matrix §40–§52). Sabotage check:
+- `lsof` → symlink busybox → **1 FAIL** (§52)
+- `NODE_OPTIONS` preload dimatikan di `fake-run` → **1 FAIL** (§51b)
+
+### 41.4b Batas yang TIDAK bisa diperbaiki di distro
+
+**NETLINK_ROUTE diblokir Android.** Shim `LD_PRELOAD` tak bisa menyentuh
+(Node memanggil syscall mentah, bukan libc — lihat §48), dan supervisor tak
+bisa karyakan kernel netlink tanpa mengarang data interface. Fallback loopback
+adalah pilihan konservatif: **tak ada alamat LAN yang dikarang**, jadi tak ada
+yang salah terhubung. App yang benar-benar butuh enumerasi interface asli tak
+bisa dilayani di Android — bukan tugas distro.
+
+### 41.5 Dua pendekatan yang gagal (agar tak diulang)
 
 - **Optimasi `is_dynamic` (§46, sudah DIBATALKAN)**: mengganti `readelf`
   dengan 2×`od` + cache. A/B interleaved 3×: **bottleneck-nya bukan di

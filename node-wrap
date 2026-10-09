@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+/* Wrapper node untuk wadah Alpine (ronde 23, device 2026-10-09).
+ *
+ * MASALAH: Node/libuv (v24 dari Alpine) mengambil daftar interface lewat
+ * NETLINK_ROUTE (socket AF_NETLINK + RTM_GETLINK). Android memblokir
+ * bind/sendto netlink dengan EACCES — bahkan di HOST Termux, jadi ini batas
+ * kernel, bukan efek wadah. Akibatnya os.networkInterfaces() melempar
+ * ERR_SYSTEM_ERROR errno 13, dan app yang memanggilnya saat start langsung
+ * crash (9router cli.js getLanIp()).
+ *
+ * BUKAN sekadar "abaikan error" langsung, tapi pasang
+ * handler: kalau networkInterfaces() melempar (atau hasilnya kosong),
+ * kembalikan fallback minimal (loopback) supaya app bisa lanjut. App yang
+ * benar-benar butuh info interface asli tidak bisa dilayani di Android —
+ * jadi menebak alamat LAN justru lebih berbahaya daripada menolaknya.
+ *
+ * Fallback sengaja KONSERVATIF: hanya loopback 127.0.0.1/::1. Tidak ada
+ * alamat LAN yang dikarang, jadi tak ada yang salah terhubung.
+ */
+
+const os = require("os");
+
+/* Simpan networkInterfaces asli; pasang versi yang tahan-gagal. */
+let origNIF = null;
+try { origNIF = os.networkInterfaces; } catch (e) { /* frozen */ }
+
+if (origNIF && !origNIF.__fakeSafe) {
+  const fallback = () => {
+    const lo = { address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4",
+                 mac: "00:00:00:00:00:00", internal: true, cidr: "127.0.0.0/8" };
+    const lo6 = { address: "::1", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6",
+                  mac: "00:00:00:00:00:00", internal: true,
+                  cidr: "::1/128", scopeid: 0 };
+    return { lo: [lo, lo6] };
+  };
+  let cached = null;
+  const safe = function networkInterfaces() {
+    if (cached) return cached;
+    try {
+      const r = origNIF.call(os);
+      if (r && Object.keys(r).length) { cached = r; return r; }
+    } catch (e) {
+      /* EACCES netlink — jatuh ke bawah */
+    }
+    cached = fallback();
+    return cached;
+  };
+  safe.__fakeSafe = true;
+  try {
+    Object.defineProperty(os, "networkInterfaces", {
+      value: safe, writable: true, configurable: true, enumerable: true,
+    });
+  } catch (e) {
+    /* tak bisa ditimpa — biarkan, app mungkin memang tak pernah memanggil */
+  }
+}

@@ -189,6 +189,28 @@ dbg_env=()
 # Hermes Agent). Nilai dari luar tetap menang bila user sengaja men-set.
 dbg_env+=("UV_LIBC=${UV_LIBC:-musl}")
 
+# §51: Node/libuv (v24 Alpine) ambil daftar interface lewat NETLINK_ROUTE, yang
+# Android blokir dengan EACCES — bahkan di host Termux, jadi batas kernel bukan
+# efek wadah (device 2026-10-09: 9router crash di getLanIp, dashboard tak pernah
+# tampil padahal server sehat). Shim/svsp tak bisa reaches: Node panggil
+# syscall mentah, bukan libc.
+# Fix: preload kecil yang membungkus os.networkInterfaces() dengan fallback
+# loopback. Sengaja KONSERVATIF — tak ada alamat LAN yang dikarang, jadi tak
+# ada yang salah terhubung. Node yang working normal tak tersentuh (fallback
+# hanya dipakai saat fungsi asli melempar atau mengembalikan kosong).
+# dipakai saat fungsi asli melempar atau mengembalikan kosong).
+_fk_netlink_safe="$HOME_BASE/usr/local/share/fakeroot/node-netlink-safe.js"
+if [ -f "$_fk_netlink_safe" ]; then
+    case "${NODE_OPTIONS:-}" in
+        *node-netlink-safe.js*) : ;;   # sudah ada, jangan dobel
+        "")
+            dbg_env+=("NODE_OPTIONS=--require=$_fk_netlink_safe") ;;
+        *)
+            dbg_env+=("NODE_OPTIONS=${NODE_OPTIONS} --require=$_fk_netlink_safe") ;;
+    esac
+fi
+unset _fk_netlink_safe
+
 cd "$HOME_BASE"
 # Opsional: mulai dari direktori lain (mis. /root wadah agar prompt pendek).
 # Default tanpa FAKE_START = $HOME_BASE (perilaku lama, tidak berubah).

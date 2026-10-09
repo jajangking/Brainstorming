@@ -60,9 +60,12 @@ CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
         "$HOME/linux-headers-cache.apk")
 # Skrip kita di DALAM wadah (bukan konten user — tetap dibersihkan meski
 # --keep-rootfs, karena tanpa fake-run keduanya tak berguna).
-INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine")
+INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine"
+        "$BASE/usr/local/share/fakeroot/node-netlink-safe.js"
+        "$BASE/usr/local/share/fakeroot/procnet/if_inet6")
 # Direktori yang kita buat sendiri (sisa registry launcher dll).
-DIRS=("$PREFIX/share/brainstorming")
+DIRS=("$PREFIX/share/brainstorming"
+      "$BASE/usr/local/share/fakeroot")
 
 echo
 info "Hapus Brainstorming dari Termux..."

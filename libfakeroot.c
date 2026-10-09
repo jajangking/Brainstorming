@@ -193,6 +193,39 @@ static void fk_rewrite(char *out, size_t n, const char *p) {
 
 static int fk_is_abs(const char *p) { return p && p[0] == '/'; }
 
+/* §51: SELURUH /proc/net/ EACCES di Termux (batas kernel Android, bukan
+ * bug wadah — terbukti juga di host: /proc/net/tcp, route, dev, if_inet6).
+ * Akibatnya libuv uv_interface_addresses() gagal dan Node melempar
+ * ERR_SYSTEM_ERROR errno 13 pada os.networkInterfaces(). App yang memanggil
+ * itu saat start (9router cli.js getLanIp, device 2026-10-09) langsung crash —
+ * browsable dashboard tidak pernah tampil padahal server-nya sehat.
+ *
+ * Solusi: kalau path /proc/net/...Tlậ GAGAL dibuka, arahkan ke salinan
+ * statis di $BASE/proc/net (dibuat bootstrap saat install). Isinya hasil
+ * snapshot sekali — cukup untuk libuv parsing, dan TIDAK membocorkan data
+ * jaringan host (hanya loopback + nama interface generik).
+ * Hanya berlaku bila host benar-benar menolak: kalau /proc/net bisa dibuka
+ * (mis. di Termux versi lain), pakai yang host — lebih akurat. */
+static int fk_procnet_subst(const char *path, char *out, size_t n) {
+    if (strncmp(path, "/proc/net/", 10) != 0) return 0;
+    const char *sd = getenv("FAKE_PROCNET");
+    if (!sd || !*sd) sd = "/usr/local/share/fakeroot/procnet";
+    snprintf(out, n, "%s%s/%s", fk_base, sd, path + 10);
+    return 1;
+}
+
+/* buka path; kalau EACCES/EPERM/ENOENT dan itu /proc/net/, pakai snapshot.
+ * Macro (bukan fungsi) supaya bisa memakai CALL/next_<fn> per target. */
+#define FK_OPEN_RETRY(fn, b, flags, mode, orig) ({                              \
+    int _fd = CALL(fn, b, FK_FLAGS(flags), mode);                               \
+    if (_fd < 0 && (orig) &&                                                   \
+        (errno == EACCES || errno == EPERM || errno == ENOENT)) {               \
+        char _b2[PATH_MAX];                                                     \
+        if (fk_procnet_subst((orig), _b2, sizeof _b2))                          \
+            _fd = CALL(fn, _b2, FK_FLAGS(flags), mode);                         \
+    }                                                                           \
+    _fd; })
+
 #define NEXT(fn) \
     static __typeof__(&fn) next_##fn; \
     do { if (!next_##fn) next_##fn = dlsym(RTLD_NEXT, #fn); } while (0);
@@ -235,7 +268,7 @@ int open(const char *path, int flags, ...) {
     mode_t mode = 0;
     va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
     NEXT(open);
-    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); int fd = CALL(open, b, FK_FLAGS(flags), mode); if (fd < 0) fk_dbg("open %s -> %s FAIL errno=%d", path, b, errno); return fd; }
+    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); int fd = FK_OPEN_RETRY(open, b, flags, mode, path); if (fd < 0) fk_dbg("open %s -> %s FAIL errno=%d", path, b, errno); return fd; }
     return CALL(open, path, FK_FLAGS(flags), mode);
 }
 int open64(const char *path, int flags, ...) {
@@ -249,7 +282,17 @@ int openat(int dirfd, const char *path, int flags, ...) {
     mode_t mode = 0;
     va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap);
     NEXT(openat);
-    if (fk_is_abs(path)) { char b[PATH_MAX]; fk_rewrite(b, sizeof b, path); int fd = CALL(openat, dirfd, b, FK_FLAGS(flags), mode); if (fd < 0) fk_dbg("openat(%d) %s -> %s FAIL errno=%d", dirfd, path, b, errno); return fd; }
+    if (fk_is_abs(path)) {
+        char b[PATH_MAX]; fk_rewrite(b, sizeof b, path);
+        int fd = CALL(openat, dirfd, b, FK_FLAGS(flags), mode);
+        if (fd < 0 && (errno == EACCES || errno == EPERM || errno == ENOENT)) {
+            char b2[PATH_MAX];
+            if (fk_procnet_subst(path, b2, sizeof b2))
+                fd = CALL(openat, dirfd, b2, FK_FLAGS(flags), mode);
+        }
+        if (fd < 0) fk_dbg("openat(%d) %s -> %s FAIL errno=%d", dirfd, path, b, errno);
+        return fd;
+    }
     return CALL(openat, dirfd, path, FK_FLAGS(flags), mode);
 }
 int openat64(int dirfd, const char *path, int flags, ...) {

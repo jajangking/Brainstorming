@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§50 ==="
+info "=== matrix regresi §40-§52 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -253,6 +253,38 @@ if [ "$OUT" = "ok" ]; then
 else
     fail "§50 cd relatif masih mengenai file benar" "out=$OUT"
 fi
+
+# §51a /proc/net/ EACCES di Termux (juga di host, bukan efek wadah). Shim dan
+# supervisor Falling back ke snapshot di $BASE/usr/local/share/fakeroot/procnet
+# supaya app musl yang pakai getifaddrs() tak gagal.
+OUT=$(bash "$FR" --svsp sh -c 'head -c 1 /proc/net/if_inet6 >/dev/null 2>&1 && echo READABLE' 2>&1)
+if [ "$OUT" = "READABLE" ]; then
+    pass "§51a /proc/net/if_inet6 bisa dibaca (snapshot)"
+else
+    fail "§51a /proc/net/if_inet6 bisa dibaca (snapshot)" "out=$OUT"
+fi
+
+# §51b Node/libuv ambil interface lewat NETLINK_ROUTE yang Android blokir
+# (EACCES). Preload fake-run harus membuat os.networkInterfaces() tidak melempar.
+OUT=$(bash "$FR" --svsp sh -c 'node -e "const n=require(\"os\").networkInterfaces();console.log(Object.keys(n).length>0?\"NIF-OK\":\"NIF-KOSONG\")"' 2>&1)
+if [ "$OUT" = "NIF-OK" ]; then
+    pass "§51b node os.networkInterfaces() tidak melempar"
+else
+    fail "§51b node os.networkInterfaces() tidak melempar" "out=$(printf '%s' "$OUT" | tail -1)"
+fi
+
+# §52 lsof GNU WAJIB: busybox lsof mengabaikan -t dan -i sehingga
+# `lsof -ti:PORT` mengembalikan baris penuh, bukan PID. App yang parse
+# kolom ke-2 (9router killProcessOnPort) lalu kill -9 <baris> → invalid,
+# selalu gagal diam-diam (device 2026-10-09).
+OUT=$(bash "$FR" sh -c 'lsof -ti:49374 2>/dev/null' 2>&1 | head -1)
+case "$OUT" in
+    "") pass "§52 lsof GNU: -ti:PORT mengembalikan kosong untuk port tak dipakai" ;;
+    *"	"*) fail "§52 lsof GNU: -ti:PORT mengembalikan kosong untuk port tak dipakai" \
+              "kolom BER-TAB terdeteksi → busybox lsof, bukan GNU: $OUT" ;;
+    *)    fail "§52 lsof GNU: -ti:PORT mengembalikan kosong untuk port tak dipakai" \
+              "mengembalikan isi tak terduga: $OUT" ;;
+esac
 
 # §49 node/npm ikut base_packages: tanpa itu fresh install tak punya npm sama
 # sekali, jadi `npm install -g` yang tervalidasi di §47 tak bisa dipakai.

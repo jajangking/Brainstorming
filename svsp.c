@@ -56,6 +56,7 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/time.h>   /* utimes() — tanpa ini: implicit declaration */
+#include <limits.h>     /* PATH_MAX — untuk snapshot /proc/net (§51) */
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -674,6 +675,12 @@ struct rule { int cls; long nr; };
 static struct rule rules[] = {
     /* paling sering dipakai (openat, stat, statx) — di depan utk BPF scan pendek */
     { C_OPEN,      SYS_openat      },
+    /* §51: open(2) polos (bukan openat) — musl getifaddrs memakainya untuk
+     * /proc/net/if_inet6. Tanpa rule ini syscall-nya tak pernah sampai ke
+     * supervisor, jadi fallback snapshot tak mungkin dipakai. */
+#ifdef SYS_open
+    { C_OPEN,      SYS_open        },
+#endif
 #ifdef SYS_openat2
     { C_OPEN,      SYS_openat2     },
 #endif
@@ -935,6 +942,17 @@ static void handle(int listener, const struct seccomp_notif *req) {
     int forced = 0;
     if (cls == C_OPEN && nr == SYS_openat && SVSP_HAS_TMPFILE(a[2]))
         forced = 1;
+    /* §51: /proc/net/ adalah PASSTHROUGH (bagian /proc/ di atas), jadi
+     * changed=0 -> CONTINUE -> child membuka sendiri dan kena EACCES dari
+     * kernel Android. Padahal kita punya snapshot replacement. Paksa
+     * supervisor menanganinya supaya fallback-nyaw could've dipakai. */
+    if (!forced && cls == C_OPEN && pbuf[0] == '/' &&
+        !strncmp(pbuf, "/proc/net/", 10))
+        forced = 1;
+    /* also for plain open(2), not just openat */
+    if (!forced && cls == C_OPEN && nr != SYS_openat && pbuf[0] == '/' &&
+        !strncmp(pbuf, "/proc/net/", 10))
+        forced = 1;
     if (cls == C_EXEC)
         forced = 1;
     if (changed && cls != C_EXEC && cls != C_CHDIR)
@@ -1047,6 +1065,32 @@ static void handle(int listener, const struct seccomp_notif *req) {
             if (fd < 0) errno = sav;
         }
 #endif
+        /* §51: SELURUH /proc/net/ EACCES di Termux (batas kernel Android —
+         * terbukti juga di host: /proc/net/{tcp,route,dev,if_inet6}). Akibatnya
+         * libuv uv_interface_addresses() gagal, Node melempar ERR_SYSTEM_ERROR
+         * errno 13 di os.networkInterfaces(), dan app yang memanggilnya saat
+         * start langsung crash (9router cli.js getLanIp, device 2026-10-09:
+         * dashboard tak pernah tampil padahal server sehat).
+         * Fallback: arahkan ke snapshot statis $BASE/proc/net (loopback saja).
+         * Hanya bila host benar-benar menolak — kalau /proc/net bisa dibaca,
+         * pakai yang host (lebih akurat). */
+        if (fd < 0 && pout[0] == '/' &&
+            !strncmp(pbuf, "/proc/net/", 10) &&
+            (errno == EACCES || errno == EPERM || errno == ENOENT)) {
+            char snap[PATH_MAX];
+            const char *sd = getenv("FAKE_PROCNET");
+            if (!sd || !*sd) sd = "/usr/local/share/fakeroot/procnet";
+            /* Snapshot tinggal di dalam base: path = base + <suffix>.
+             * suffix sd (mis. /usr/local/share/fakeroot/procnet) sudah path
+             * absolut, jadi potong saja agar tak jadi <base><absolut>. */
+            char sfx[PATH_MAX];
+            snprintf(sfx, sizeof sfx, "%s/%s", sd, pbuf + 10);
+            snprintf(snap, sizeof snap, "%s%s", base, sfx);
+            int fd2 = openat(AT_FDCWD, snap, (int)oflags, 0);
+            DBG("open /proc/net%s gagal errno=%d -> snapshot %s = fd %d\n",
+                pbuf + 10, fd < 0 ? -errno : 0, snap, fd2);
+            if (fd2 >= 0) fd = fd2;
+        }
         /* Sudut-2 §25.1 BELUM terpecahkan: simlink dgn O_PATH|O_NOFOLLOW tetap
          * ELOOP — fd O_PATH ke simlink mustahil dikirim lewat ADDFD (kernel
          * fget() menolak FMODE_PATH) dan tak ada fd non-O_PATH yang mewakili
