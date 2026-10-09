@@ -63,6 +63,7 @@ CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
 # Skrip kita di DALAM wadah (bukan konten user — tetap dibersihkan meski
 # --keep-rootfs, karena tanpa fake-run keduanya tak berguna).
 INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine"
+        "$BASE/usr/local/bin/ps"
         "$BASE/usr/local/share/fakeroot/node-netlink-safe.js"
         "$BASE/usr/local/share/fakeroot/procnet/if_inet6")
 # .git.off = .git yang disembunyikan hermes-reinstall (§54). Kalau process-nya

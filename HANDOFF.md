@@ -2560,7 +2560,42 @@ Fix: `hermes-reinstall` memakai venv python + `activation_environment`
 Hermes (cara `venv_sync`), lewat driver `hermes-nodeps-driver.py`. Key
 identik dengan yang dihitung tail -> `reusing completed install`.
 
-### 41.4j Addendum: `hermes` belum nyambung ke PATH
+### 41.4k §56 — wrapper `ps` untuk `lstart` (codex daemon)
+
+Keluhan: `codex` (0.162.0, di wadah) mati `Error: No such file or directory`
+kecuali `--no-daemon`. Jejak strace → `ps -p PID -o stat= -o lstart=`:
+
+| Lapisan | Hasil |
+|---|---|
+| busybox `ps` | tak kenal `-o lstart=` → usage error |
+| GNU `ps` (procps) | kenal, tapi "Unable to get system boot time" — `/proc/stat` btime EACCES di Android |
+| wrapper `ps-wrap` | hitung `lstart` dari `/proc/PID/stat` + anchor stabil → codex lolos ke tahap berikut |
+
+Dua bug kecil saat menulis wrapper (dicatat agar tak diulang): `$20`
+artinya `${2}0` di POSIX sh (pakai `${20}`), dan field `starttime` adalah
+posisi 20 setelah `##*)` (bukan 22 — prefix `pid (comm)` memakan 2).
+
+Batas jujur: nilai tanggalnya FIKTIF (boot epoch tak bisa dibaca di Android:
+`/proc/stat`, `/proc/uptime`, `/proc/loadavg`, `sysinfo()` — semua EACCES).
+Yang dijamin: stabil antar-baca untuk proses sama, beda untuk proses beda
+(termasuk PID reuse), gagal untuk PID mati. Cukup untuk pid-management
+(codex, Hermes `update_lock` fallback). Tertulis di komentar wrapper.
+
+Pekerjaan daemon codex DIHENTIKAN di tengah (§57, di bawah) atas permintaan
+pemilik — jadi wrapper ini tercatat apa adanya, bukan sebagai klaim solusi.
+
+### 41.4l §57 — codex daemon: DIBATALKAN atas permintaan pemilik
+
+Investigasi sempat maju 3 tahap (ps lolos via §56, lalu `bind` unix socket
+EACCES karena supervisor tak intercept bind/connect + `/tmp` lolos ke host,
+lalu ketahuan `sun_path` 108-byte tak muat path hasil rewrite sehingga perlu
+rewrite relatif) sebelum pemilik membatalkan ("udh lah bng gk jd").
+Kode C_SOCK setengah-jadi SUDAH di-revert dari `svsp.c` + binary rebuild —
+`git status` bersih, perilaku kembali persis seperti sebelum investigasi.
+`--no-daemon` tetap jalan untuk codex. Pelajaran: setengah implementasi di
+supervisor lebih berbahaya daripada tidak ada (EFAULT buta vs EACCES jujur).
+
+### 41.4m Addendum: `hermes` belum nyambung ke PATH
 
 Setelah `hermes-reinstall` sukses, programnya jalan tapi `hermes` tak bisa
 dipanggil dari `alpine` — tak ada satu pun file rc yang menambahkan

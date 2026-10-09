@@ -1,0 +1,106 @@
+#!/bin/sh
+# ps kompatibilitas untuk wadah Alpine (§56, device 2026-10-09).
+#
+# MASALAH: app Rust modern (codex daemon pid-management, dan pola yang sama
+# dipakai Hermes update_lock sebagai fallback) memanggil:
+#     ps -p <PID> -o stat= -o lstart=
+# untuk memverifikasi proses yang baru di-spawn (anti PID-reuse).
+#   - busybox ps: tak kenal `-o lstart=` -> usage error (rc=1).
+#   - GNU ps (procps): kenal, tapi gagal "Unable to get system boot time"
+#     karena /proc/stat btime EACCES di Android (batas kernel, bukan bug).
+# Akibat: codex daemon mati dengan "failed to invoke/read start time ...
+# No such file or directory", dan user disuruh pakai --no-daemon.
+#
+# Wrapper ini HANYA menangani pola `-p PID -o ...` (satu PID, kolom stat /
+# lstart / pid); sisanya di-delegasikan ke ps asli (/bin/ps). lstart
+# dihitung TANPA btime: boot_epoch = now - uptime(/proc/uptime, readable)
+# + starttime_ticks/HZ dari /proc/PID/stat field 22. Format keluaran
+# mengikuti GNU: "Day Mon DD HH:MM:SS YYYY" (mis. "Thu Oct  9 18:20:00 2026").
+REAL_PS="/bin/ps"
+BASE="$(dirname "$0")"
+
+is_codex_probe=0
+pid=""
+want_stat=0; want_lstart=0; want_pid=0
+expect=""; extra=0
+for a in "$@"; do
+    if [ -n "$expect" ]; then
+        case "$expect" in
+            p) pid="$a" ;;
+            o) o="${a%%=*}"
+               case "$o" in
+                   stat) want_stat=1 ;;
+                   lstart) want_lstart=1 ;;
+                   pid) want_pid=1 ;;
+                   *) extra=1 ;;
+               esac ;;
+        esac
+        expect=""
+        continue
+    fi
+    case "$a" in
+        -p) expect="p" ;;
+        -p*) [ -z "$pid" ] && pid="${a#-p}" ;;
+        -o) expect="o" ;;
+        -o*) o="${a#-o}"; o="${o%%=*}"
+             case "$o" in
+                 stat) want_stat=1 ;;
+                 lstart) want_lstart=1 ;;
+                 pid) want_pid=1 ;;
+                 *) extra=1 ;;
+             esac ;;
+        [0-9]*) [ -z "$pid" ] && pid="$a" ;;
+        *) extra=1 ;;
+    esac
+done
+[ -n "$expect" ] && extra=1
+
+# Bukan pola yang kita tangani -> delegasi penuh.
+if [ -z "$pid" ] || [ "$extra" -eq 1 ] || { [ "$want_stat" -eq 0 ] && [ "$want_lstart" -eq 0 ] && [ "$want_pid" -eq 0 ]; }; then
+    exec "$REAL_PS" "$@"
+fi
+case "$pid" in ''|*[!0-9]*) exec "$REAL_PS" "$@" ;; esac
+
+stat_line="$(cat "/proc/$pid/stat" 2>/dev/null)" || exit 1
+# field 3 = state, field 22 = starttime. Setelah buang "pid (comm) ",
+# posisi bergeser 2: state=$1, starttime=${20} (bukan $20 yang artinya ${2}0!).
+rest="${stat_line##*) }"
+set -- $rest
+state="$1"
+startticks="${20}"
+case "$startticks" in ''|*[!0-9]*) exit 1 ;; esac
+
+# HZ kernel (getconf CLK_TCK; fallback 100).
+hz="$(getconf CLK_TCK 2>/dev/null)" || hz=100
+[ "$hz" -gt 0 ] 2>/dev/null || hz=100
+
+# BOOT EPOCH: tak bisa dibaca di Android (/proc/stat btime, /proc/uptime,
+# /proc/loadavg, sysinfo() — semuanya EACCES; batas kernel, bukan bug).
+# Untungnya pemakai lstart (codex pid-management, Hermes update_lock
+# fallback) hanya butuh KONSISTENSI: proses yang sama dibaca dua kali harus
+# memberi nilai sama; proses beda (termasuk PID reuse) harus beda. Keduanya
+# terpenuhi oleh anchor ARBITRER tapi STABIL: file di /tmp wadah, dibuat
+# sekali (now - 7 hari agar tanggalnya masuk akal), dipakai selamanya.
+# Nilai absolutnya fiktif — didokumentasikan, bukan disembunyikan.
+anchor_file="/tmp/.ps-wrap-boot-epoch"
+boot="$(cat "$anchor_file" 2>/dev/null)" || boot=""
+case "$boot" in ''|*[!0-9]*)
+    boot=$(( $(date +%s) - 604800 ))
+    printf '%s\n' "$boot" > "$anchor_file" 2>/dev/null || exit 1
+    ;;
+esac
+
+if [ "$want_pid" -eq 1 ]; then printf '%s\n' "$pid"; fi
+if [ "$want_stat" -eq 1 ]; then
+    case "$state" in
+        R) printf 'R\n' ;; S) printf 'S\n' ;; D) printf 'D\n' ;;
+        T|t) printf 'T\n' ;; Z|X|x) printf 'Z\n' ;;
+        *) printf '%s\n' "$state" ;;
+    esac
+fi
+if [ "$want_lstart" -eq 1 ]; then
+    start_epoch="$((boot + startticks / hz))"
+    # Format GNU lstart: "Day Mon DD HH:MM:SS YYYY" (DD lebar 2, spasi).
+    date -d "@$start_epoch" '+%a %b %e %H:%M:%S %Y'
+fi
+exit 0

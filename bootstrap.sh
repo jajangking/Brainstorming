@@ -367,6 +367,12 @@ install() {
         install_atomic "$SRC/app" "$PREFIX/bin/app"
         install_atomic "$SRC/app" "$BASE/usr/local/bin/app"
     fi
+    # §56: wrapper `ps` — busybox ps tak kenal `-o lstart=`, GNU ps gagal
+    # "Unable to get system boot time" (/proc/stat btime EACCES di Android).
+    # App Rust (codex daemon pid-management) butuh itu; wrapper menghitung
+    # lstart dari /proc/PID/stat + anchor stabil (lihat ps-wrap).
+    [ -f "$SRC/ps-wrap" ] && \
+        install_atomic "$SRC/ps-wrap" "$BASE/usr/local/bin/ps"
     # stub `alpine` di dalam wadah: `alpine` asli milik host (bionic) tak bisa
     # dieksekusi dari dalam wadah, jadi beri petunjuk alih-alih "not found".
     [ -f "$SRC/alpine-in-container" ] && \
