@@ -196,6 +196,20 @@ if [ -n "${FAKE_START:-}" ] && [ -d "$FAKE_START" ]; then
     cd "$FAKE_START"
 fi
 
+# §50: PWD harus path WADAH, bukan path host. Shell di dalam wadah tak bisa
+# chroot() (butuh root), jadi cwd kernel tetap $BASE/... — tapi $PWD yang
+# tampil di prompt dan dibaca app (npm "verbose cwd", Node process.cwd()) harus
+# path yang natural: "/root", bukan "/data/.../alpine-rootfs/root". Supervisor
+# sudah chdir ke base, jadi pemetaan logis<->kernel konsisten; cukup buang
+# prefix base di depan PWD lalu tulis ulang ke bentuk wadah.
+_fakepwd="$(pwd)"
+case "$_fakepwd" in
+    "$HOME_BASE")                FAKE_PWD=/ ;;
+    "$HOME_BASE"/*)              FAKE_PWD="/${_fakepwd#"$HOME_BASE"/}" ;;
+    *)                           FAKE_PWD="$_fakepwd" ;;
+esac
+unset _fakepwd
+
 if [ "$MODE" = svsp ]; then
     # ===== jalur supervisor USER_NOTIF (statis / --svsp) =====
     [ -n "$SVSP" ] || for d in "$(dirname "$0")" "$HOME" "$HOME/Brainstorming" "$PREFIX/bin"; do
@@ -233,7 +247,8 @@ if [ "$MODE" = svsp ]; then
       ${ldp[@]+"${ldp[@]}"} \
       HOME="$HOME_BASE/root" \
       TMPDIR="$HOME_BASE/tmp" \
-      PWD="$(pwd)" \
+      PWD="$FAKE_PWD" \
+      FAKE_PWD="$FAKE_PWD" \
       USER=root LOGNAME=root SHELL=/bin/sh \
       TERM="${TERM:-xterm-256color}" \
       LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}" \
@@ -262,7 +277,8 @@ exec env -i \
   LD_LIBRARY_PATH="$HOME_BASE/lib:$HOME_BASE/usr/lib" \
   HOME="$HOME_BASE/root" \
   TMPDIR="$HOME_BASE/tmp" \
-  PWD="$(pwd)" \
+  PWD="$FAKE_PWD" \
+  FAKE_PWD="$FAKE_PWD" \
   USER=root LOGNAME=root SHELL=/bin/sh \
   TERM="${TERM:-xterm-256color}" \
   LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}" \

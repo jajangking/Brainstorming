@@ -2239,7 +2239,7 @@ menangkap regresi: menyabotase `fake-run` (matikan preload di `--svsp`)
 sekitar jalur supervised dynamic); setelah dipulihkan → **0 FAIL**.
 Jalankan `./selftest` setelah menyentuh shim/svsp/fake-run.
 
-## 41. RONDE 21 — `npm install -g` di dalam wadah (2026-10-09)
+## 41. RONDE 21 — `npm install -g` + `$PWD` path wadah (2026-10-09)
 
 Dua bug nyata muncul dari laporan pengguna: `npm install -g 9router` gagal
 `ENOENT: mkdir '/usr/local/lib'`. Bukan salah konfigurasi npm, tapi **dua
@@ -2273,11 +2273,41 @@ patching manual pada wadah. Wrapper `npm` tidak pernah ikut terpasang
   cepat** daripada shim (285 ms vs 372 ms per boot, rata-rata 3×), jadi ini
   bukan trade-off performa.
 - `svsp.c`: `passthrough()` lengkap dengan padanan tanpa garis miring.
-- `selftest` §8: matrix regresi §40–§48, termasuk 4 check baru (§47 dua,
-  §48 dua — satu fungsional, satu struktural). Terbukti menangkap regresi:
-  menyabotase `passthrough("/data")` → **3 FAIL**; dipulihkan → **0 FAIL**.
+- `selftest` §8: matrix regresi §40–§50, termasuk 7 check baru (§47 dua,
+  §48 dua, §49 satu, §50 tiga — §50 sengaja menguji PWD **dan** konsistensi
+  kernel cwd karena itu dua lapis yang wajib benar). Terbukti menangkap
+  regresi: menyabotase `passthrough("/data")` → **3 FAIL**; menyabotase §50
+  (svsp+fake-run kembali ke HEAD) → **2 FAIL**; dipulihkan → **0 FAIL**.
 
-### 41.2 Jebakan yang sempat menyesatkan (catat biar tak diulang)
+### 41.2 §50: `$PWD` akhirnya jadi path wadah
+
+Keluhan: prompt menujukkan `alpine:/data/data/com.termux/files/home/alpine-rootfs❯`
+— panjang, membingungkan, dan membocorkan struktur device. Sumbernya bukan
+`$PWD` yang salah baca, tapi `svsp.c` yang memang menyetelnya:
+
+```c
+setenv("PWD", base, 1);      /* path HOST */
+```
+
+Fix dua lapis (kedua wajib; kalau hanya satu, shell menolaknya):
+
+| Lapis | Perubahan | Kenapa wajib |
+|---|---|---|
+| `svsp.c` | `$PWD` = `FAKE_PWD` dari caller (bentuk `/root`), default `/` | inilah yang tampil di prompt dan dibaca app |
+| `svsp.c` | `chdir()` supervisor ke `$BASE$FAKE_PWD`, bukan `$BASE` | shell membandingkan `$PWD` vs device+inode cwd saat start |
+| `fake-run` | hitung `FAKE_PWD` dari `pwd` dengan membuang prefix base | sumber kebenaran |
+
+Tanpa lapis kedua, `PWD=/root` tapi kernel cwd `$BASE` → ash/bash melihat
+device+inode berbeda, **menolak `$PWD` lalu jatuh ke `getcwd()`**, dan path
+host muncul lagi. Ini sempat membingungkan karena `env` menunjukkan `PWD=/root`
+sementara `sh -c 'echo $PWD'` menunjukkan path host — keduanya benar, hanya
+shell yang mengoreksinya.
+
+`Node process.cwd()` **masih** path host. Itu disengaja dan konsisten dengan
+§27/§28: `getcwd` menjawab kebenaran host supaya runtime yang memanggil syscall
+mentah (Bun/Zig) tak gagal. `FAKE_VIEW=container` memulihkan tampilan wadah.
+
+### 41.3 Jebakan yang sempat menyesatkan (catat biar tak diulang)
 
 - Gejala `ENOENT mkdir '/usr/local/lib'` **terlihat seperti** direktori hilang,
   padahal `/usr/local/lib` ada. Selalu baca *stack* di log npm dulu
@@ -2292,8 +2322,16 @@ patching manual pada wadah. Wrapper `npm` tidak pernah ikut terpasang
 - Node me-realpath-kan modul utama, sehingga `/usr/local/lib/node_modules/...`
   di stack trace tampil sebagai path **host** (`/data/.../alpine-rootfs/...`).
   Itu normal di fake-chroot, bukan kebocoran yang perlu "diperbaiki".
+- **Sabotage test harus menyertakan binary, bukan hanya sumber.** Saat menguji
+  §50 sempat terlihat "0 FAIL" padahal `fake-run`/`svsp` di `$PREFIX/bin`
+  masih versi HEAD — `git stash` mengembalikan sumber tapi binary terpasang
+  tidak ikut berubah. Selalu rebuild + `install_atomic` sebelum menyimpulkan
+  regresi tertangkap (atau tidak).
+- **`test -x` pada symlink relatif gagal** (`cd /usr; test -x bin/ls`) — sudah
+  ada **sebelum §50** (dibuktikan A/B ke HEAD), bukan regresi. `test -x` pada
+  file biasa (`bin/node`) jalan. Jadi jangan dipakai sebagai check §50.
 
-### 41.3 Dua pendekatan yang gagal (agar tak diulang)
+### 41.4 Dua pendekatan yang gagal (agar tak diulang)
 
 - **Optimasi `is_dynamic` (§46, sudah DIBATALKAN)**: mengganti `readelf`
   dengan 2×`od` + cache. A/B interleaved 3×: **bottleneck-nya bukan di

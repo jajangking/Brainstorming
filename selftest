@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§49 ==="
+info "=== matrix regresi §40-§50 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -229,6 +229,29 @@ if [ -f "$SELF_DIR/alpine" ] && grep -qF -- '--svsp --base=' "$SELF_DIR/alpine";
     pass "§48 alpine: shell wadah lewat --svsp"
 else
     fail "§48 alpine: shell wadah lewat --svsp" "alpine tak memanggil fake-run --svsp"
+fi
+
+# §50 $PWD harus path WADAH ("/" atau "/root"), bukan path host panjang.
+# Dua lapis wajib benar: PWD di env child, DAN kernel cwd konsisten (shell
+# membandingkan $PWD vs device+inode cwd; kalau beda, ash/bash jatuh ke
+# getcwd() dan path host muncul lagi).
+OUT=$(bash "$FR" --svsp sh -c 'printf "%s" "$PWD"' 2>&1)
+if [ "$OUT" = "/" ]; then
+    pass "§50 svsp: PWD = / (bukan path host)"
+else
+    fail "§50 svsp: PWD = / (bukan path host)" "PWD=$OUT"
+fi
+OUT=$(FAKE_START="$BASE/root" bash "$FR" --svsp sh -c 'printf "%s|%s" "$PWD" "$(test -d .npm && echo ada || echo tak)"' 2>&1)
+case "$OUT" in
+    /root\|ada) pass "§50 svsp: FAKE_START=/root -> PWD=/root + cwd benar" ;;
+    *)          fail "§50 svsp: FAKE_START=/root -> PWD=/root + cwd benar" "out=$OUT" ;;
+esac
+# cd relatif masih harus mengenai file yang benar setelah PWD diterjemahkan.
+OUT=$(bash "$FR" --svsp sh -c 'cd /usr && test -x bin/node && printf ok' 2>&1)
+if [ "$OUT" = "ok" ]; then
+    pass "§50 cd relatif masih mengenai file benar"
+else
+    fail "§50 cd relatif masih mengenai file benar" "out=$OUT"
 fi
 
 # §49 node/npm ikut base_packages: tanpa itu fresh install tak punya npm sama

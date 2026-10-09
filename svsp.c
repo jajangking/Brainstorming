@@ -1416,7 +1416,20 @@ int main(int argc, char **argv) {
     if (i >= argc) { fprintf(stderr, "svsp: butuh program\n"); return 2; }
     char *prog = argv[i];
 
-    if (chdir(base) < 0) { fprintf(stderr, "svsp: chdir %s: %s\n", base,
+    /* §50: cwd supervisor haruskONSISTEN dengan $PWD yang kita setel di bawah.
+     * Shell membandingkan $PWD dengan device+inode cwd saat start; kalau
+     * kernel cwd = $BASE tapi $PWD = "/root", ash/bash menolaknya lalu jatuh
+     * ke getcwd() — hasilnya path host panjang yang tidak kita mau.
+     * FAKE_PWD datang dari fake-run dalam bentuk "/root"; chdir ke
+     * $BASE/root supaya keduanya konsisten. Tanpa FAKE_PWD tetap $BASE
+     * (perilaku lama) dan $PWD="/". */
+    const char *want_pwd = getenv("FAKE_PWD");
+    char startdir[4096];
+    snprintf(startdir, sizeof startdir, "%s", base);
+    if (want_pwd && want_pwd[0] == '/' && strcmp(want_pwd, "/") != 0) {
+        snprintf(startdir, sizeof startdir, "%s%s", base, want_pwd);
+    }
+    if (chdir(startdir) < 0) { fprintf(stderr, "svsp: chdir %s: %s\n", base,
                                    strerror(errno)); return 2; }
 
     /* env ala wadah */
@@ -1427,7 +1440,19 @@ int main(int argc, char **argv) {
         snprintf(h, sizeof h, "%s/tmp", base);
         setenv("TMPDIR", h, 1);
     }
-    setenv("PWD", base, 1);
+    /* §50: PWD dalam bentuk WADAH, bukan path host. Shell tak bisa chroot()
+     * (butuh root) sehingga cwd kernel tetap $BASE/...; tapi $PWD yang tampil
+     * di prompt dan dibaca app (npm "verbose cwd", Node process.cwd()) harus
+     * path yang natural: "/root", bukan "/data/.../alpine-rootfs/root".
+     * Caller (fake-run) menyetel FAKE_PWD; tanpa itu $PWD = "/". */
+    {
+        const char *want = getenv("FAKE_PWD");
+        if (want && want[0] == '/') {
+            setenv("PWD", want, 1);
+        } else {
+            setenv("PWD", "/", 1);
+        }
+    }
     setenv("USER", "root", 1); setenv("LOGNAME", "root", 1);
     setenv("SHELL", "/bin/sh", 1);
     setenv("FAKE_BASE", base, 1);

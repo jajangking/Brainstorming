@@ -107,3 +107,31 @@ dipulihkan → 0 FAIL.
   lalu jalan normal. Postinstall-nya (SQLite/tray warm-up) ikut berhasil.
 - `npm install -g` dipakai juga untuk `cowsay` sebagai paket uji cepat
   (11–41 paket, ~5 detik).
+
+## Ronde 22 sisipan — `$PWD` (§50)
+
+Prompt menunjukkan `alpine:/data/data/com.termux/files/home/alpine-rootfs❯`.
+Akar masalahnya satu baris di `svsp.c`: `setenv("PWD", base, 1)` menyetel path
+host. Fix-nya perlu **dua lapis** — hanya menyetel `$PWD` tak cukup, karena
+shell membandingkan `$PWD` dengan device+inode cwd saat start dan jatuh ke
+`getcwd()` kalau beda, sehingga path host tetap muncul:
+
+```
+$ env | grep ^PWD          → PWD=/root        (svsp benar)
+$ sh -c 'echo $PWD'        → /data/.../base   (shell mengoreksi jadi getcwd)
+```
+
+Setelah `chdir()` supervisor ikut ke `$BASE/root`, keduanya konsisten:
+
+```
+PWD=/
+PWD=/root   (dengan FAKE_START=$BASE/root)
+$ cd /usr; test -x bin/node   → OK
+```
+
+`Node process.cwd()` tetap path host — disengaja, konsisten dengan §27/§28
+(`getcwd` menjawab kebenaran host agar runtime syscall-mentah tak gagal).
+`FAKE_VIEW=container` memulihkan tampilan wadah.
+
+Verifikasi: `selftest` → **0 FAIL** (matrix §40–§50). Sabotage §50 (svsp +
+fake-run dikembalikan ke HEAD) → **2 FAIL**, terbukti check-nya bekerja.
