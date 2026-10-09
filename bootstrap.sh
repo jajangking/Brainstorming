@@ -339,6 +339,10 @@ install() {
         install_atomic "$SRC/app" "$PREFIX/bin/app"
         install_atomic "$SRC/app" "$BASE/usr/local/bin/app"
     fi
+    # stub `alpine` di dalam wadah: `alpine` asli milik host (bionic) tak bisa
+    # dieksekusi dari dalam wadah, jadi beri petunjuk alih-alih "not found".
+    [ -f "$SRC/alpine-in-container" ] && \
+        install_atomic "$SRC/alpine-in-container" "$BASE/usr/local/bin/alpine"
     log "terpasang: $PREFIX/bin/fake-run, $PREFIX/bin/svsp, $PREFIX/bin/alpine, ~/libfakeroot.so"
     [ -f "$PREFIX/bin/app" ] && log "daftar aplikasi: app (juga di dalam wadah: /usr/local/bin/app)"
 }

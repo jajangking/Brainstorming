@@ -1,0 +1,30 @@
+#!/bin/sh
+# alpine (dalam wadah) — stub petunjuk.
+#
+# Perintah `alpine` yang sesungguhnya (masuk shell, update, ports) adalah
+# skrip bash milik HOST Termux dan tidak bisa dieksekusi dari dalam wadah
+# (bionic vs musl bentrok di level loader). Jadi kalau orang mengetik
+# `alpine ...` di dalam shell wadah, tampilkan petunjuk yang jelas alih-alih
+# "not found" yang membingungkan.
+
+G=$'\033[1;38;2;0;255;0m'
+O=$'\033[38;2;255;135;0m'
+D=$'\033[2;38;2;0;170;0m'
+N=$'\033[0m'
+
+cat <<EOF
+
+  ${G}alpine${N}  ${D}adalah perintah milik HOST Termux — bukan di dalam wadah.${N}
+
+  ${O}keluar dulu dari shell wadah:${N}
+      exit
+  ${O}lalu jalankan di Termux:${N}
+      alpine ports      # daftar port app + deteksi bentrok
+      alpine update     # tarik update repo + pasang ulang alat
+      alpine            # masuk lagi ke wadah
+
+  ${D}Alternatif dari dalam wadah:${N}
+      app               # daftar aplikasi terpasang
+      app <NAMA>        # jalankan aplikasi
+
+EOF

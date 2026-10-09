@@ -1,11 +1,17 @@
 #!/data/data/com.termux/files/usr/bin/bash
 #
-# alpine — Masuk shell Alpine di wadah palsu (pengganti proot-distro login alpine)
+# alpine — masuk shell Alpine di wadah palsu (pengganti proot-distro login alpine)
 #
-# Pakai:
+# Pakai (dari HOST Termux):
 #   alpine                    # masuk shell interaktif
 #   alpine -c "command"       # jalankan command
 #   alpine apk add vim        # jalankan apk langsung
+#   alpine update             # tarik update repo + pasang ulang alat
+#   alpine ports              # daftar port app + deteksi bentrok
+#
+# CATATAN: dari DALAM shell wadah (prompt `alpine:~❯`) perintah ini tak
+# ada — `alpine` hidup di host Termux ($PREFIX/bin). Untuk update/ports dari
+# dalam wadah, panggil versi wadah: `host-alpine update` / `host-alpine ports`.
 #
 # Sama kayak `proot-distro login alpine`, tapi native speed.
 
