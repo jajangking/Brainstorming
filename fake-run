@@ -162,10 +162,21 @@ if [ "$MODE" = auto ]; then
     # sepenuhnya, sehingga `npm install -g` gagal "ENOENT mkdir
     # /usr/local/lib". Node memang dinamis (ada PT_INTERP) tapi butuh
     # supervisor: di situlah path diterjemahkan di level syscall.
+    #
+    # §53: shell (sh/bash/dash/ash) juga wajib supervisor. Awalnya shell
+    # dianggap aman di jalur shim karena libc-nya ter-interpose — TAPI begitu
+    # ia me-spawn anak STATIS (probe Go, lefthook, busybox--install penuh),
+    # anak itu mengabaikan LD_PRELOAD dan syscall-nya KABUR: rewrite tak
+    # terjadi, `newfstatat("/usr/bin/git")` jadi ENOENT padahal berkasnya ada.
+    # Gejala nyata: `npm ci` di repo Hermes memanggil `lefthook install`
+    # (biner Go statis) yang gagal LookPath "git: not found in $PATH", lalu
+    # installer gagal publish command `hermes`.
+    # Bukti A/B: probe statis yang sama -> rc 0 saat langsung, ENOENT saat
+    # di-exec oleh shell di jalur shim (--svsp -> rc 0 lagi).
     if [ "$MODE" = ldpreload ]; then
         case "$(basename "$host")" in
-            node|node[0-9]*|bun|deno|uv|uvx|nodejs)
-                MODE=svsp ;;
+            node|node[0-9]*|bun|deno|uv|uvx|nodejs)   MODE=svsp ;;
+            sh|bash|dash|ash|ksh|zsh)                 MODE=svsp ;;
         esac
     fi
 fi

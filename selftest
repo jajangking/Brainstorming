@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§52 ==="
+info "=== matrix regresi §40-§53 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -271,6 +271,54 @@ if [ "$OUT" = "NIF-OK" ]; then
     pass "§51b node os.networkInterfaces() tidak melempar"
 else
     fail "§51b node os.networkInterfaces() tidak melempar" "out=$(printf '%s' "$OUT" | tail -1)"
+fi
+
+# §53 shell WAJIB lewat supervisor. Shim LD_PRELOAD tak bisa menjangkau anak
+# STATIS (probe Go, lefthook) yang di-spawn shell: syscall-nya mentah, path tak
+# ter-rewrite, `newfstatat("/usr/bin/git")` jadi ENOENT padahal berkasnya ada.
+# Gejala nyata: `npm ci` di repo Hermes memanggil `lefthook install` yang gagal
+# LookPath "git: not found in $PATH". Bukti A/B: probe statis yang sama -> OK
+# saat langsung / --svsp, ENOENT saat di-exec shell di jalur shim.
+# WAJIB memakai anak STATIS: sh yang dynamic bisa di-shim, jadi test pakai
+# `stat(1)` selalu hijau dan tak membuktikan apa pun. Probe kecil di-build:
+# memanggil newfstatat(AT_FDCWD, "/etc/alpine-release") lewat syscall mentah —
+# persis yang dilakukan runtime Go/Bun — lalu menulis hasilnya ke stdout.
+ST53DIR="$BASE/tmp/.selftest-53"
+if mkdir -p "$ST53DIR" 2>/dev/null &&
+   cat > "$ST53DIR/p.c" <<'P53EOF'
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <fcntl.h>
+#include <unistd.h>
+struct s_st { unsigned long pad[18]; };
+int main(void){ struct s_st s;
+  long r = syscall(79 /*newfstatat*/, AT_FDCWD, "/etc/alpine-release", &s, 0);
+  printf("%ld\n", r); return r < 0 ? 1 : 0; }
+P53EOF
+then
+    _crt="$(clang -print-resource-dir 2>/dev/null)/lib/linux/libclang_rt.builtins-aarch64-android.a"
+    clang --target=aarch64-alpine-linux-musl --sysroot="$BASE" -static -nostdlib -O2 -w \
+        -o "$ST53DIR/p" "$BASE/usr/lib/crt1.o" "$BASE/usr/lib/crti.o" "$ST53DIR/p.c" \
+        "$BASE/usr/lib/libc.a" "$BASE/usr/lib/crtn.o" "$_crt" 2>/dev/null
+    if [ -x "$ST53DIR/p" ]; then
+        OUT=$(bash "$FR" /bin/sh -c "'$ST53DIR/p'" 2>&1 | tr -d '\r' | tail -1)
+        if [ "$OUT" = "0" ]; then
+            pass "§53 shell via supervisor (anak statis tak kabur)"
+        else
+            fail "§53 shell via supervisor (anak statis tak kabur)" \
+                 "newfstatat dari anak statis = '$OUT' (harusnya 0)"
+        fi
+        rm -rf "$ST53DIR" 2>/dev/null
+    else
+        info "§53 dilewati: gagal build probe statis"
+    fi
+else
+    info "§53 dilewati: tak bisa buat direktori probe"
+fi
+if grep -qF 'sh|bash|dash|ash|ksh|zsh' "$SELF_DIR/fake-run"; then
+    pass "§53 fake-run: shell dipaksa MODE=svsp"
+else
+    fail "§53 fake-run: shell dipaksa MODE=svsp" "daftar shell tak ada di fake-run"
 fi
 
 # §52 lsof GNU WAJIB: busybox lsof mengabaikan -t dan -i sehingga

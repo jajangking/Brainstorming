@@ -2370,6 +2370,71 @@ adalah pilihan konservatif: **tak ada alamat LAN yang dikarang**, jadi tak ada
 yang salah terhubung. App yang benar-benar butuh enumerasi interface asli tak
 bisa dilayani di Android — bukan tugas distro.
 
+### 41.4c §53 — shell harus lewat supervisor (bukan shim)
+
+Keluhan: installer Hermes Agent gagal publish command `hermes`.
+`npm ci` → `prepare` → `lefthook install` (biner Go **statis**) →
+`Error: exec: "git": executable file not found in $PATH`.
+
+Dua bug berbeda muncul beruntun, dan saya sempat salah diagnosa yang pertama:
+
+**Bug A (ternyata tak pernah terjadi).** Log installer menunjukkan
+`SIGSYS: bad system call / syscall.Faccessat` (nr 439 = `faccessat2`).
+Saya hypothesisfhandler SIGSYS di child supervisor akan menolong — lalu
+teti discover **tidak akan**:
+- `execv()` me-**reset** semua handler sinyal, jadi handler yang dipasang
+  sebelum exec hilang
+- `SIG_IGN` (disposisi yang bertahan melewati execve) juga tak menolong —
+  Android tetap membunuh dengan SIGSYS, bukan mengembalikan `-ENOSYS`
+- filter Android menolak `faccessat2` **sebelum** notifikasi supervisor,
+  jadi `rules[]` yang sudah punya `SYS_faccessat2` tak pernah terpakai
+
+Kesimpulan: biner Go statis **tidak bisa** diselamatkan di fake-chroot ini.
+Kerja yang dibuang: blok handler di `svsp.c`. Biaya: satu sore.
+
+**Bug B (fix-nya nyata, dan ini yang sebenarnya penting).** A/B probe
+menunjukkan hal yang jauh lebih mendasar:
+
+```
+$ fake-run <probe-statis>              → newfstatat("/usr/bin/git") = 0
+$ fake-run /bin/sh -c "<probe-statis>" → newfstatat("/usr/bin/git") = -1 ENOENT
+$ fake-run --svsp /bin/sh -c "<probe>" → newfstatat("/usr/bin/git") = 0
+```
+
+Berkasnya **ada**. Penyebabnya §48 yang sudah dikenal: `/bin/sh` dinamis →
+`MODE=ldpreload` → shim `LD_PRELOAD` aktif **hanya untuk sh**. Begitu sh
+me-spawn anak **statis**, anak itu mengabaikan shim, syscall-nya mentah,
+path tak ter-rewrite → ENOENT.-Go `LookPath` gagal karena itu, bukan karena
+`faccessat2`.
+
+Fix: `fake-run` memaksa `MODE=svsp` untuk `sh|bash|dash|ash|ksh|zsh`,
+sama seperti yang sudah dilakukan untuk Node.
+
+### 41.4d Pelajaran soal tes
+
+Dua tes pertama untuk §53 **selalu hijau** dan baru saya sadari setelah
+sabotase tak terdeteksi:
+
+1. Tes `stat -c %s /etc/alpine-release` — `stat` itu dynamic, jadi shim
+   bisa menginterpose; tesnya tak pernah menguji apa yang saya kira.
+2. Tes struktural (`grep 'sh|bash|...' fake-run`) — menguji **sumber**,
+   bukan binary terpasang. Sabotase saya terapkan ke `$PREFIX/bin/fake-run`,
+   jadi tesnya tetap hijau.
+
+Tes yang benar membangun probe **statis** di dalam selftest, memanggil
+`newfstatat` lewat syscall mentah, dan menjalankannya sebagai anak shell.
+Baru itu menangkap sabotase (1 FAIL). Aturan yang saya dapat: kalau tesnya
+hijau padahal kamu **yakin** ada yang rusak, tesnya yang salah — bukan
+keadaan.
+
+### 41.4e Yang tetap tak terpecahkan
+
+`lefthook install` masih gagal karena `faccessat2` (batas Android, Bug A).
+Tapi itu **tidak menghalangi Hermes**: `npm ci` tetap selesai
+("added 556 packages"), `node_modules`, `ui-tui/node_modules`, dan
+`web/node_modules` terisi penuh. Yang hilang cuma pemasangan git hook —
+tidak dibutuhkan untuk menjalankan Hermes.
+
 ### 41.5 Dua pendekatan yang gagal (agar tak diulang)
 
 - **Optimasi `is_dynamic` (§46, sudah DIBATALKAN)**: mengganti `readelf`
