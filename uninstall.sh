@@ -1,73 +1,161 @@
 #!/data/data/com.termux/files/usr/bin/bash
 #
-# uninstall.sh — Hapus Brainstorming dari Termux
+# uninstall.sh — Hapus Brainstorming dari Termux.
 #
-# Pakai: ./uninstall.sh [--keep-rootfs]
+# Pakai: ./uninstall.sh [--keep-rootfs] [--yes] [--dry-run]
 #
 # Opsi:
-#   --keep-rootfs   Simpan wadah Alpine, hapus tools aja
+#   --keep-rootfs   Simpan wadah Alpine (utk app/config di dalamnya), hapus alat saja
+#   --yes           Jangan tanya konfirmasi (untuk non-interaktif/script)
+#   --dry-run       Tampilkan yang AKAN dihapus, tanpa menghapus apa pun
 
 set -euo pipefail
 
-# ESC asli ($'...'), bukan teks literal \033 — konsisten dgn install.sh.
 RED=$'\033[1;31m'
 GREEN=$'\033[1;32m'
 YELLOW=$'\033[1;33m'
+CYAN=$'\033[1;36m'
 NC=$'\033[0m'
 
 log()  { printf "${GREEN}[✓] %s${NC}\n" "$*"; }
 warn() { printf "${YELLOW}[!] %s${NC}\n" "$*"; }
 info() { printf "${RED}[i] %s${NC}\n" "$*"; }
+dim()  { printf "${CYAN}    %s${NC}\n" "$*"; }
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME="${HOME:-/data/data/com.termux/files/home}"
+BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
 KEEP_ROOTFS=0
+ASSUME_YES=0
+DRY_RUN=0
 
 for a in "$@"; do
     case "$a" in
         --keep-rootfs) KEEP_ROOTFS=1 ;;
-        --help)
-            echo "Pakai: ./uninstall.sh [--keep-rootfs]"
-            echo "  --keep-rootfs   Simpan wadah Alpine, hapus tools aja"
-            exit 0
-            ;;
+        -y|--yes)      ASSUME_YES=1 ;;
+        -n|--dry-run)  DRY_RUN=1 ;;
+        --help|-h)
+            cat <<EOF
+Pakai: ./uninstall.sh [--keep-rootfs] [--yes] [--dry-run]
+
+  --keep-rootfs   Simpan wadah Alpine (app & config di dalamnya tetap ada),
+                  hapus hanya alat di \$PREFIX/bin + shim + cache.
+  --yes, -y       Jangan tanya konfirmasi.
+  --dry-run, -n   Tampilkan yang akan dihapus, tanpa menghapus.
+
+PERINGATAN: tanpa --keep-rootfs, SELURUH ~/alpine-rootfs dihapus — termasuk
+app yang terpasang di dalamnya (Hermes, opencode, Claude Code, config).
+Ukur dulu: du -sh ~/alpine-rootfs
+EOF
+            exit 0 ;;
     esac
 done
+
+# --- kumpulkan target lebih dulu, supaya bisa diringkas & dikonfirmasi ------
+# Alat di host
+TOOLS=("$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$PREFIX/bin/alpine"
+       "$PREFIX/bin/app" "$HOME/libfakeroot.so")
+# Cache unduhan
+CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
+        "$HOME/linux-headers-cache.apk")
+# Skrip kita di DALAM wadah (bukan konten user — tetap dibersihkan meski
+# --keep-rootfs, karena tanpa fake-run keduanya tak berguna).
+INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine")
 
 echo
 info "Hapus Brainstorming dari Termux..."
 echo
 
-# Hapus tools
-for f in "$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$PREFIX/bin/alpine" "$PREFIX/bin/apps" \
-         "$PREFIX/share/brainstorming/apps.list" "$HOME/libfakeroot.so"; do
-    if [ -f "$f" ] || [ -L "$f" ]; then
-        rm -f "$f"
-        log "Hapus: $f"
+# kumpulkan yang ada + hitung total ukuran dulu
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+
+total_bytes=0
+for f in "${TOOLS[@]}" "${CACHES[@]}" "${INSIDE[@]}"; do
+    present "$f" || continue
+    if [ -f "$f" ] && [ ! -L "$f" ]; then
+        sz=$(du -k "$f" 2>/dev/null | cut -f1); total_bytes=$(( total_bytes + ${sz:-0} ))
     fi
 done
+if [ "$KEEP_ROOTFS" -eq 0 ] && [ -d "$BASE" ]; then
+    sz=$(du -sk "$BASE" 2>/dev/null | cut -f1); total_bytes=$(( total_bytes + ${sz:-0} ))
+fi
+printf '  total: %s\n\n' "$(printf '%d' "$total_bytes" | awk '{if($1>1048576) printf "%.1f GB", $1/1048576; else printf "%.0f MB", $1/1024}')"
 
-# Hapus cache
-for f in "$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"; do
-    if [ -f "$f" ]; then
-        rm -f "$f"
-        log "Hapus cache: $f"
-    fi
-done
-
-# Hapus rootfs (opsional)
 if [ "$KEEP_ROOTFS" -eq 0 ]; then
-    if [ -d "$HOME/alpine-rootfs" ]; then
-        rm -rf "$HOME/alpine-rootfs"
-        log "Hapus wadah: ~/alpine-rootfs/"
+    warn "Akan menghapus SELURUH wadah: $BASE"
+    dim "berisi app & config (Hermes, opencode, Claude Code, .config, ...)"
+    warn "Untuk menyimpan isinya: ./uninstall.sh --keep-rootfs"
+    echo
+fi
+
+# Konfirmasi (kecuali --yes / --dry-run)
+if [ "$ASSUME_YES" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    if [ ! -t 0 ]; then
+        info "stdin bukan terminal → gunakan --yes untuk konfirmasi otomatis"
+        exit 1
+    fi
+    printf '  Lanjutkan penghapusan? [y/N] '
+    read -r ans
+    case "$ans" in
+        y|Y|yes|YES) ;;
+        *) info "Dibatalkan."; exit 0 ;;
+    esac
+    echo
+fi
+
+do_rm() { # do_rm <file> <label>
+    local f=$1 label=$2
+    present "$f" || return 0
+    if [ "$DRY_RUN" -eq 1 ]; then
+        dim "akan hapus [$label]: $f"
+    else
+        rm -f "$f" 2>/dev/null || { warn "gagal hapus: $f"; return 0; }
+        log "Hapus [$label]: $f"
+    fi
+}
+
+# 1) alat di host
+for f in "${TOOLS[@]}"; do do_rm "$f" "alat"; done
+
+# 2) skrip di dalam wadah (selalu, meski --keep-rootfs)
+for f in "${INSIDE[@]}"; do do_rm "$f" "dalam wadah"; done
+
+# 3) cache unduhan
+for f in "${CACHES[@]}"; do do_rm "$f" "cache"; done
+
+# 4) wadah
+if [ "$KEEP_ROOTFS" -eq 0 ]; then
+    if [ -d "$BASE" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            dim "akan hapus [wadah]: $BASE/"
+        else
+            rm -rf "$BASE"
+            log "Hapus [wadah]: $BASE/"
+        fi
     fi
 else
-    warn "Wadah ~/alpine-rootfs/ disimpan (--keep-rootfs)"
+    warn "Wadah $BASE/ disimpan (--keep-rootfs)"
 fi
 
+# 5) ringkasan sisa
 echo
-log "Brainstorming sudah dihapus!"
-if [ "$KEEP_ROOTFS" -eq 1 ]; then
-    echo "  Wadah Alpine masih ada di ~/alpine-rootfs/"
-    echo "  Hapus manual: rm -rf ~/alpine-rootfs"
+if [ "$DRY_RUN" -eq 1 ]; then
+    log "Dry-run selesai — tidak ada yang dihapus."
+    exit 0
 fi
+
+left=0
+for f in "${TOOLS[@]}" "${CACHES[@]}"; do present "$f" && left=1; done
+[ -d "$BASE" ] && left=1
+
+if [ "$left" -eq 0 ]; then
+    log "Brainstorming sudah dihapus!"
+else
+    log "Selesai. Yang tersisa:"
+    for f in "${TOOLS[@]}" "${CACHES[@]}"; do present "$f" && dim "$f"; done
+    [ -d "$BASE" ] && dim "$BASE/ (wadah,kept)"
+fi
+echo
+echo "  ${CYAN}Repo${NC} masih ada di $HOME/Brainstorming — hapus manual bila selesai:"
+echo "    rm -rf $HOME/Brainstorming"
 echo
