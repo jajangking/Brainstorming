@@ -157,6 +157,17 @@ is_dynamic() {
 
 if [ "$MODE" = auto ]; then
     if is_dynamic "$host"; then MODE=ldpreload; else MODE=svsp; fi
+    # §48: runtime yang memanggil syscall MENTAH (Node/Bun/Deno via libuv)
+    # tidak bisa di-interpose LD_PRELOAD — rewrite path shim dilewati
+    # sepenuhnya, sehingga `npm install -g` gagal "ENOENT mkdir
+    # /usr/local/lib". Node memang dinamis (ada PT_INTERP) tapi butuh
+    # supervisor: di situlah path diterjemahkan di level syscall.
+    if [ "$MODE" = ldpreload ]; then
+        case "$(basename "$host")" in
+            node|node[0-9]*|bun|deno|uv|uvx|nodejs)
+                MODE=svsp ;;
+        esac
+    fi
 fi
 
 mkdir -p "$HOME_BASE/root" "$HOME_BASE/tmp" || true

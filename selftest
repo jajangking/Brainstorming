@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§45 ==="
+info "=== matrix regresi §40-§47 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -145,7 +145,9 @@ chk "§40 svsp+bash: PATH-lookup test -x" "$(printf '%s' "$OUT" | grep -q XOK; e
 # §42 Node/Bun memanggil io_uring_setup yang di-trap Android; ENOSYS membuat
 # libuv menutup ringfd tak-invalid lalu abort. Shim harus jawab fd /dev/null.
 # (Hanya dicek bila ada biner node di wadah — tidak dipasang default.)
-NODEBIN="$(find "$BASE/root" -type f -name node -path '*node*/bin/node' 2>/dev/null | head -1)"
+NODEBIN="$( { find "$BASE/root" -type f -name node -path '*node*/bin/node' 2>/dev/null; \
+               find "$BASE" -maxdepth 4 -type f -name node -path '*/bin/node' 2>/dev/null; \
+               find "$BASE" -maxdepth 3 -type f -name node 2>/dev/null; } | head -1)"
 if [ -n "$NODEBIN" ]; then
     OUT=$(bash "$FR" "$NODEBIN" -e 'console.log("SELFTEST-NODE-OK")' 2>&1); RC=$?
     chk "§42 node -e (io_uring guard)" "$(printf '%s' "$OUT" | grep -q 'SELFTEST-NODE-OK'; echo $?)" "out=$(printf '%s' "$OUT" | tail -1)"
@@ -189,6 +191,44 @@ if [ -f "$SVSP_SRC" ]; then
     fi
 else
     info "§45 dilewati: svsp.c tak ditemukan di $SELF_DIR"
+fi
+
+# §47 path HOST yang bocor keluar dari container tidak boleh di-rewrite.
+# "/data/" sudah passthrough sejak §20, tapi "/data" (tanpa garis miring)
+# TIDAK -> jadi $BASE/data -> ENOENT. Node memanggil lstat("/data") sebagai
+# komponen pertama fs.realpathSync, sehingga `npm install -g <paket>`
+# mati "ENOENT lstat '/data'" (device 2026-10-09).
+OUT=$(bash "$FR" --svsp sh -c 'test -d /data && echo DATA-PASSTHROUGH-OK' 2>&1); RC=$?
+chk "§47 svsp: /data (tanpa slash) passthrough" "$(printf '%s' "$OUT" | grep -q 'DATA-PASSTHROUGH-OK'; echo $?)" "out=$(printf '%s' "$OUT" | tail -1)"
+
+NODEBIN2="$(find "$BASE" -maxdepth 5 -type f -name node 2>/dev/null | head -1)"
+if [ -n "$NODEBIN2" ]; then
+    OUT=$(bash "$FR" --svsp "$NODEBIN2" -e 'require("fs").realpathSync("/data");console.log("SELFTEST-47-OK")' 2>&1); RC=$?
+    chk "§47 node realpathSync('/data')" "$(printf '%s' "$OUT" | grep -q 'SELFTEST-47-OK'; echo $?)" "out=$(printf '%s' "$OUT" | tail -1)"
+
+    # §48 runtime syscall mentah (Node via libuv) tak bisa di-interpose shim
+    # LD_PRELOAD; harus lewat supervisor. Yang diuji di sini mode auto fake-run
+    # memilih svsp untuk nama runtime tersebut.
+    if bash "$FR" "$NODEBIN2" -e 'require("fs").realpathSync(process.cwd());console.log("SELFTEST-46-OK")' >/dev/null 2>&1 ||
+       bash "$FR" --svsp "$NODEBIN2" -e 'require("fs").realpathSync(process.cwd())' >/dev/null 2>&1; then
+        pass "§48 node nyata (auto/svsp) bisa realpath host"
+    else
+        fail "§48 node nyata (auto/svsp) bisa realpath host" "node gagal realpathSync di dalam wadah"
+    fi
+else
+    info "§48/§47 dilewati sebagian: biner 'node' tak ada di wadah"
+fi
+
+# §48 fake-run + alpine wajib memilih supervisor untuk runtime raw-syscall.
+if [ -f "$SELF_DIR/fake-run" ] && grep -qF 'node[0-9]*' "$SELF_DIR/fake-run"; then
+    pass "§48 fake-run: runtime raw-syscall dipaksa MODE=svsp"
+else
+    fail "§48 fake-run: runtime raw-syscall dipaksa MODE=svsp" "daftar node/bun/deno tak ada di fake-run"
+fi
+if [ -f "$SELF_DIR/alpine" ] && grep -qF -- '--svsp --base=' "$SELF_DIR/alpine"; then
+    pass "§48 alpine: shell wadah lewat --svsp"
+else
+    fail "§48 alpine: shell wadah lewat --svsp" "alpine tak memanggil fake-run --svsp"
 fi
 
 # --- 9. pembersihan ----------------------------------------------------------

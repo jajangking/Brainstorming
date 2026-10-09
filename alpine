@@ -118,7 +118,13 @@ if [ $# -eq 0 ]; then
     fi
     rm -f "$_blk"
 
-    exec env -u LD_PRELOAD FAKE_START="$BASE/root" "$FR" --base="$BASE" /bin/sh -l
+    # §48: shell wadah WAJIB lewat supervisor (--svsp), bukan shim LD_PRELOAD.
+    # Node/Bun/Deno memanggil syscall mentah lewat libuv, jadi shim tak bisa
+    # me-rewrite path-nya -> mkdir("/usr/local/lib") kena path host -> ENOENT.
+    # Gejala: `npm install -g <paket>` gagal. Supervisor menulis ulang path di
+    # level syscall sehingga juga berlaku untuk anak proses. Di device ini
+    # svsp justru lebih cepat (285 ms vs 372 ms per boot).
+    exec env -u LD_PRELOAD FAKE_START="$BASE/root" "$FR" --svsp --base="$BASE" /bin/sh -l
 elif [ "$1" = "update" ]; then
     # ------------------------------------------------- alpine update
     # Tarik pembaruan repo lalu pasang ulang binary turunan (shim/svsp/loader
@@ -199,8 +205,10 @@ elif [ "$1" = "ports" ]; then
 elif [ "$1" = "-c" ]; then
     # alpine -c "command" — jalankan command string di dalam wadah
     shift
-    exec env -u LD_PRELOAD "$FR" --base="$BASE" /bin/sh -c "$*"
+    exec env -u LD_PRELOAD "$FR" --svsp --base="$BASE" /bin/sh -c "$*"
 else
     # alpine <program> [args...] — program di-resolve via PATH wadah (fake-run)
-    exec env -u LD_PRELOAD "$FR" --base="$BASE" "$@"
+    # --svsp: program apa pun bisa punya anak berekstensi Node/Bun, jadi
+    # supervisor dipakai juga di sini (§48).
+    exec env -u LD_PRELOAD "$FR" --svsp --base="$BASE" "$@"
 fi

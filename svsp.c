@@ -205,16 +205,21 @@ static int passthrough(const char *p) {
      * Wajib passthrough agar wrapper shebang (#!/system/bin/sh) dan linker
      * dinamis host (bionic membuka /system/lib64, /apex/...) tidak ikut
      * ter-rewrite ke $BASE (device-feedback 2026-10-07). */
+    /* §47: padanan TANPA garis miring di akhir juga wajib ikut. Dulu "/data/" ada
+     * tapi "/data" tidak, sehingga lstat("/data") (komponen pertama yang
+     * dipanggil fs.realpathSync Node) ter-rewrite jadi $BASE/data -> ENOENT.
+     * Gejala: `npm install -g <paket>` dari dalam wadah gagal "lstat
+     * '/data'" (device 2026-10-09). */
     return p[0] != '/'                    /* relatif: resolve di child  */
         || !strncmp(p, "/dev/", 5) || !strcmp(p, "/dev")
         || !strncmp(p, "/proc/", 6) || !strcmp(p, "/proc")
         || !strncmp(p, "/sys/", 5) || !strcmp(p, "/sys")
         || !strncmp(p, "/system/", 8) || !strcmp(p, "/system")
-        || !strncmp(p, "/apex/", 6)
-        || !strncmp(p, "/vendor/", 8)
-        || !strncmp(p, "/product/", 9)
-        || !strncmp(p, "/linkerconfig/", 14)
-        || !strncmp(p, "/data/", 6)
+        || !strncmp(p, "/apex/", 6) || !strcmp(p, "/apex")
+        || !strncmp(p, "/vendor/", 8) || !strcmp(p, "/vendor")
+        || !strncmp(p, "/product/", 9) || !strcmp(p, "/product")
+        || !strncmp(p, "/linkerconfig/", 14) || !strcmp(p, "/linkerconfig")
+        || !strncmp(p, "/data/", 6) || !strcmp(p, "/data")
         || (baselen && strncmp(p, base, baselen) == 0);
 }
 

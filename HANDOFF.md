@@ -2239,7 +2239,45 @@ menangkap regresi: menyabotase `fake-run` (matikan preload di `--svsp`)
 sekitar jalur supervised dynamic); setelah dipulihkan → **0 FAIL**.
 Jalankan `./selftest` setelah menyentuh shim/svsp/fake-run.
 
-### 40.4 Dua pendekatan yang gagal (agar tak diulang)
+## 41. RONDE 21 — `npm install -g` di dalam wadah (2026-10-09)
+
+Dua bug nyata muncul dari laporan pengguna: `npm install -g 9router` gagal
+`ENOENT: mkdir '/usr/local/lib'`. Bukan salah konfigurasi npm, tapi **dua
+lapis distro** yang saling menumpuk.
+
+| § | Simtom | Akar masalah | Fix |
+|---|---|---|---|
+| 48 | Node/Bun memanggil syscall **mentah** (libuv), shim `LD_PRELOAD` tak menyentuhnya → `mkdir("/usr/local/lib")` kena path **host** (tak ada di Android) → ENOENT | `fake-run` otomatis pilih `ldpreload` untuk biner dinamis; Node memang dinamis tapi butuh supervisor | `fake-run` memaksa `MODE=svsp` untuk `node*/bun/deno/uv/uvx/nodejs`; `alpine` (shell, `-c`, passthrough) memanggil `fake-run --svsp` |
+| 47 | `lstat('/data')` → ENOENT, killings `npm install -g` juga setelah §48 | `passthrough()` di `svsp.c` punya `"/data/"` **dengan** garis miring, tapi **tidak** path persis `/data`; Node memanggil `lstat("/data")` sebagai komponen pertama `fs.realpathSync` | tambahkan padanan tanpa garis miring untuk `/data`, `/apex`, `/vendor`, `/product`, `/linkerconfig` |
+
+### 41.1 Yang berubah
+
+- `fake-run`: daftar runtime raw-syscall → `MODE=svsp`.
+- `alpine`: ketiga jalur exec memakai `--svsp`. Di device svsp justru **lebih
+  cepat** daripada shim (285 ms vs 372 ms per boot, rata-rata 3×), jadi ini
+  bukan trade-off performa.
+- `svsp.c`: `passthrough()` lengkap dengan padanan tanpa garis miring.
+- `selftest` §8: matrix regresi §40–§48, termasuk 4 check baru (§47 dua,
+  §48 dua — satu fungsional, satu struktural). Terbukti menangkap regresi:
+  menyabotase `passthrough("/data")` → **3 FAIL**; dipulihkan → **0 FAIL**.
+
+### 41.2 Jebakan yang sempat menyesatkan (catat biar tak diulang)
+
+- Gejala `ENOENT mkdir '/usr/local/lib'` **terlihat seperti** direktori hilang,
+  padahal `/usr/local/lib` ada. Selalu baca *stack* di log npm dulu
+  (`~/.npm/_logs/*.log`) — di situ baru jelas syscall mana yang bocor.
+- Dua "perbaikan" yang kelihatan berhasil tapi sebenarnya salah:
+  1. `mkdir`/`mkdirat` **sudah ada** di shim (`libfakeroot.c`) sejak awal —
+     menambahkannya lagi hanya menghasilkan redefinition.
+  2. Membungkus `/usr/bin/npm` dengan wrapper `sh` agar melewati `npm-cli.js`
+     memang membuat `cowsay` lolos, tapi menutupi bug §47 yang sebenarnya.
+     Setelah §47 diperbaiki, **symlink asli `npm` juga jalan** — jadi wrapper
+     dibuang (lebih sederhana, tak perlu pemeliharaan).
+- Node me-realpath-kan modul utama, sehingga `/usr/local/lib/node_modules/...`
+  di stack trace tampil sebagai path **host** (`/data/.../alpine-rootfs/...`).
+  Itu normal di fake-chroot, bukan kebocoran yang perlu "diperbaiki".
+
+### 41.3 Dua pendekatan yang gagal (agar tak diulang)
 
 - **Optimasi `is_dynamic` (§46, sudah DIBATALKAN)**: mengganti `readelf`
   dengan 2×`od` + cache. A/B interleaved 3×: **bottleneck-nya bukan di
