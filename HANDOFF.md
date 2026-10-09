@@ -2635,6 +2635,34 @@ bukan env (biseksi `ANDROID_*` nihil), bukan shim (tanpa shim pun sama),
 bukan supervisor stat (probe OK). Terbuka untuk lain waktu; `--no-daemon`
 dan pemakaian non-API tak terpengaruh.
 
+### 41.4n §59–§61 — Termux:API dari wadah (lengkap)
+
+Laporan: perintah `termux-*` mati dari wadah. Tiga lapis:
+
+**§59** (shim): `fk_needs_loader` membungkus SEMUA ELF dinamis non-base dgn
+loader musl → biner bionic CANNOT LINK. Kini INTERP host = exec polos tanpa
+`LD_PRELOAD`/`LD_LIBRARY_PATH` musl.
+
+**§60** (passthrough): linker bionic resolve `libtranlog.so` lewat
+`/system_ext/lib64` (terbukti strace host) — tak ada di daftar → CANNOT LINK.
+Kini `/system_ext`, `/odm`, `/oem` passthrough di ketiga daftar.
+
+**§61** (env ART): sesudah §59+§60, rantai jalan (`am` exit 0) tapi HASIL
+nihil — `app_process` exit 0 diam-diam tanpa menyentuh binder. Biseksi env
+membuktikan `BOOTCLASSPATH`/`DEX2OATBOOTCLASSPATH` (+`ANDROID_*`) yang hilang
+(`env -i`): ART butuh itu untuk init; tanpanya mati sunyi. Kini `fake-run`
+meneruskan 7 var itu bila ada di host (kedua jalur exec), dan
+`termux-battery-status` mengembalikan JSON betulan dari wadah tanpa setup.
+
+Pola diagnosis yang dipakai (dicatat karena berulang guna): bandingkan
+host-vs-wadah dengan strace berdampingan (cari syscall yang ADA di host
+tapi TAK ADA di wadah — di sini `/dev/binder`), lalu biseksi
+lingkungan sampai alurnya menyatu kembali.
+
+Batas: perintah dipanggil dgn path host absolut — PATH wadah SENGAJA tak
+memuat host bin agar biner bionic tak membayangi tool wadah (node, ps,
+ls, python wadah harus tetap menang).
+
 ### 41.4o Addendum: `hermes` belum nyambung ke PATH
 
 Setelah `hermes-reinstall` sukses, programnya jalan tapi `hermes` tak bisa

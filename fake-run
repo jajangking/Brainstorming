@@ -204,6 +204,20 @@ dbg_env=()
 # Hermes Agent). Nilai dari luar tetap menang bila user sengaja men-set.
 dbg_env+=("UV_LIBC=${UV_LIBC:-musl}")
 
+# §61: teruskan env ART/host agar biner Java host (app_process, am,
+# termux-api-*) bisa jalan dari wadah. Tanpa BOOTCLASSPATH/DEX2OATBOOTCLASSPATH
+# ART exit 0 diam-diam: tak ada output, tak ada broadcast, binder tak tersentuh
+# (device 2026-10-09: termux-battery-status gantung di accept selamanya).
+# Hanya diteruskan bila ADA di host (tak pernah mengarang nilai); tak dipakai
+# program musl sehingga tak ada efek samping. Daftar minimal yang terbukti.
+art_env=()
+for _av in ANDROID_ROOT ANDROID_DATA ANDROID_ART_ROOT ANDROID_I18N_ROOT \
+          ANDROID_TZDATA_ROOT BOOTCLASSPATH DEX2OATBOOTCLASSPATH; do
+    _aval="${!_av:-}"
+    [ -n "$_aval" ] && art_env+=("$_av=$_aval")
+done
+unset _av _aval
+
 # §51: Node/libuv (v24 Alpine) ambil daftar interface lewat NETLINK_ROUTE, yang
 # Android blokir dengan EACCES — bahkan di host Termux, jadi batas kernel bukan
 # efek wadah (device 2026-10-09: 9router crash di getLanIp, dashboard tak pernah
@@ -292,6 +306,7 @@ if [ "$MODE" = svsp ]; then
       COLORTERM="${COLORTERM:-truecolor}" \
       ${extra_env[@]+"${extra_env[@]}"} \
       ${dbg_env[@]+"${dbg_env[@]}"} \
+      ${art_env[@]+"${art_env[@]}"} \
       "$SVSP" --base="$HOME_BASE" "${tgt[@]}" "$@"
 fi
 
@@ -322,4 +337,5 @@ exec env -i \
   COLORTERM="${COLORTERM:-truecolor}" \
   ${extra_env[@]+"${extra_env[@]}"} \
   ${dbg_env[@]+"${dbg_env[@]}"} \
+  ${art_env[@]+"${art_env[@]}"} \
   "$LOADER" "${tgt[@]}" "$@"

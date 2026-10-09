@@ -129,7 +129,7 @@ chk "shim: /data passthrough" "$([ $RC -eq 0 ]; echo $?)" "rc=$RC (HANDOFF §20.
 # Empat bug yang ditemukan saat memasang Hermes Agent di wadah. Semuanya kini
 # ter-fix; test ini menjaga agar perubahan shim/svsp/fake-run masa depan tak
 # membatalkannya. Gagal di sini = regresi nyata, bukan masalah lingkungan.
-info "=== matrix regresi §40-§60 ==="
+info "=== matrix regresi §40-§61 ==="
 
 # §40 supervised dynamic harus memuat shim; tanpa itu `bash` di supervisor mati
 # SIGSYS (trap faccessat2/faccessat yang tiba SEBELUM notif svsp).
@@ -364,6 +364,22 @@ if [ -n "$OUT" ]; then
     pass "§60 /system_ext passthrough (isi: $OUT)"
 else
     fail "§60 /system_ext passthrough" "kosong/ENOENT"
+fi
+
+# §61 Termux:API dari wadah. Rantai: termux-* (host sh) -> termux-api-broadcast
+# -> am -> app_process (ART). Butuh §59 (exec host), §60 (/system_ext), DAN
+# env ART (BOOTCLASSPATH dkk, diteruskan fake-run §61). Tanpa env itu ART exit
+# 0 diam-diam: broadcast tak terkirim, binder tak tersentuh. Dipanggil dgn
+# path host absolut (PATH wadah sengaja TAK memuat host bin agar tak
+# membayangi tool wadah). Hanya bila perintahnya ada di host.
+if command -v termux-battery-status >/dev/null 2>&1; then
+    OUT=$(timeout 60 bash "$FR" --svsp sh -c '/data/data/com.termux/files/usr/bin/termux-battery-status 2>/dev/null' 2>&1 | head -2 | tr -d '\r' | tail -1)
+    case "$OUT" in
+        *'"present": true'*) pass "§61 termux-api dari wadah (battery JSON)" ;;
+        *) fail "§61 termux-api dari wadah (battery JSON)" "out=$OUT" ;;
+    esac
+else
+    info "§61 dilewati: termux-battery-status tak ada di host"
 fi
 
 # §58 penyimpanan internal HP: /sdcard & /storage wajib passthrough (bukan
