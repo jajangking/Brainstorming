@@ -25,6 +25,7 @@ dim()  { printf "${CYAN}    %s${NC}\n" "$*"; }
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
 BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/brainstorming"
 KEEP_ROOTFS=0
 ASSUME_YES=0
 DRY_RUN=0
@@ -57,8 +58,11 @@ TOOLS=("$PREFIX/bin/fake-run" "$PREFIX/bin/svsp" "$PREFIX/bin/alpine"
        "$PREFIX/bin/app" "$PREFIX/bin/hermes-reinstall" "$PREFIX/bin/hermes-web-build"
        "$PREFIX/bin/hermes-setup"
        "$PREFIX/bin/hermes-nodeps-driver.py" "$PREFIX/bin/web-split.mjs" "$HOME/libfakeroot.so")
-# Cache unduhan
-CACHES=("$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
+# Cache unduhan: lokasi baru (XDG, sejak migrasi cache) + lokasi lama
+# (era pra-XDG di $HOME, bagi yang belum migrasi).
+CACHES=("$CACHE_DIR/alpine-minirootfs.tar.gz" "$CACHE_DIR/musl-dev-cache.apk"
+        "$CACHE_DIR/linux-headers-cache.apk"
+        "$HOME/alpine-minirootfs.tar.gz" "$HOME/musl-dev-cache.apk"
         "$HOME/linux-headers-cache.apk")
 # Skrip kita di DALAM wadah (bukan konten user — tetap dibersihkan meski
 # --keep-rootfs, karena tanpa fake-run keduanya tak berguna).
@@ -72,7 +76,8 @@ INSIDE=("$BASE/usr/local/bin/app" "$BASE/usr/local/bin/alpine"
 STASHED_GIT="$BASE/root/.hermes/hermes-agent/.git.off"
 # Direktori yang kita buat sendiri (sisa registry launcher dll).
 DIRS=("$PREFIX/share/brainstorming"
-      "$BASE/usr/local/share/fakeroot")
+      "$BASE/usr/local/share/fakeroot"
+      "$CACHE_DIR")
 
 echo
 info "Hapus Brainstorming dari Termux..."
