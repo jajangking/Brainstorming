@@ -1,10 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # bootstrap.sh — bangun "wadah palsu" dari nol + pasang runner universal.
 #
-#   ./bootstrap.sh [--base=DIR] [--prefix=DIR] [--no-download] [--help]
+#   ./bootstrap.sh [--base=DIR] [--prefix=DIR] [--no-download] [--clean-cache] [--help]
 #
 # Yang dilakukan (idempoten — aman dijalankan ulang):
-#   1. rootfs Alpine mini (v3.24.2, aarch64): pakai cache $HOME/alpine-minirootfs.tar.gz
+#   1. rootfs Alpine mini (v3.24.2, aarch64): pakai cache
+#      ${XDG_CACHE_HOME:-~/.cache}/brainstorming/alpine-minirootfs.tar.gz
 #      bila ada, kalau tidak unduh dari CDN resmi.
 #   2. toolchain musl-dev (header + libc.a/crt*.o) — dibutuhkan utk build shim,
 #      sekaligus memberi kemampuan membangun binary STATIS musl.
@@ -31,8 +32,23 @@ set -euo pipefail
 
 : "${PREFIX:=/data/data/com.termux/files/usr}"
 BASE="${FAKE_BASE:-$HOME/alpine-rootfs}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/brainstorming"
 TMPW="$(mktemp -d "${TMPDIR:-/data/data/com.termux/files/usr/tmp}/bootstrap.XXXXXX")"
 trap 'rm -rf "$TMPW"' EXIT
+
+# Migrasi sekali jalan: cache lama di $HOME (era pra-XDG) dipindah ke
+# $CACHE_DIR supaya $HOME bersih. Aman idempoten — hanya jalan bila berkas
+# lama ada dan yang baru belum ada.
+migrate_cache() {
+    mkdir -p "$CACHE_DIR"
+    local f b
+    for f in alpine-minirootfs.tar.gz musl-dev-cache.apk linux-headers-cache.apk; do
+        b="$CACHE_DIR/$f"
+        if [ ! -f "$b" ] && [ -f "$HOME/$f" ]; then
+            mv "$HOME/$f" "$b" 2>/dev/null || cp "$HOME/$f" "$b" 2>/dev/null || true
+        fi
+    done
+}
 
 # ---------- versi & konstanta yang DI-PIN ----------
 ALPINE_VER=3.24.2
@@ -55,9 +71,22 @@ for a in "$@"; do
         --base=*)  BASE="${a#--base=}" ;;
         --prefix=*) PREFIX="${a#--prefix=}" ;;
         --no-download) NO_DL=1 ;;
+        --clean-cache) CLEAN_CACHE=1 ;;
         *) die "opsi tak dikenal: $a (lihat --help)" ;;
     esac
 done
+migrate_cache
+if [ -n "${CLEAN_CACHE:-}" ]; then
+    rm -f "$CACHE_DIR/alpine-minirootfs.tar.gz" \
+          "$CACHE_DIR/musl-dev-cache.apk" \
+          "$CACHE_DIR/linux-headers-cache.apk"
+    # sisa era lama bila migrasi belum jalan
+    rm -f "$HOME/alpine-minirootfs.tar.gz" \
+          "$HOME/musl-dev-cache.apk" \
+          "$HOME/linux-headers-cache.apk"
+    log "cache dibersihkan ($CACHE_DIR)"
+    exit 0
+fi
 
 for c in clang curl tar gzip grep od sha256sum strip readelf patchelf; do
     command -v "$c" >/dev/null 2>&1 || die "butuh: $c (pkg install clang binutils patchelf ...)"
@@ -86,7 +115,7 @@ provision_rootfs() {
 
     if [ ! -f "$BASE/lib/ld-musl-aarch64.so.1" ]; then
         # perlu rootfs segar
-        SRC_TAR="$HOME/alpine-minirootfs.tar.gz"
+        SRC_TAR="$CACHE_DIR/alpine-minirootfs.tar.gz"
         if [ ! -f "$SRC_TAR" ]; then
             [ -n "${NO_DL:-}" ] && die "rootfs kosong & mode --no-download"
             log "unduh minirootfs Alpine $ALPINE_VER (aarch64)..."
@@ -126,7 +155,7 @@ musl_dev() {
         log "toolchain musl-dev + linux-headers sudah ada — dipakai ulang"; return 0
     fi
     [ -n "${NO_DL:-}" ] && die "toolchain musl kurang & mode --no-download"
-    local V pkg cached="$HOME/musl-dev-cache.apk"
+    local V pkg cached="$CACHE_DIR/musl-dev-cache.apk"
     log "cari versi paket di indeks repositori Alpine..."
     curl -fsSL "$CDN/main/aarch64/APKINDEX.tar.gz" -o "$TMPW/apkindex.tar.gz" \
         || die "gagal unduh indeks paket (APKINDEX.tar.gz)"
@@ -143,7 +172,7 @@ musl_dev() {
     # Header UAPI linux (linux/audit.h dll) dibutuhkan untuk build svsp statis
     # (musl). Paket terpisah dari musl-dev; ikuti pola cache + indeks yang sama.
     if [ ! -f "$BASE/usr/include/linux/seccomp.h" ]; then
-        local LH cached_lh="$HOME/linux-headers-cache.apk"
+        local LH cached_lh="$CACHE_DIR/linux-headers-cache.apk"
         LH="$(tar -xzOf "$TMPW/apkindex.tar.gz" 2>/dev/null \
             | grep -a -m1 -A2 '^P:linux-headers$' | grep -a '^V:' | cut -d: -f2 || true)"
         [ -n "$LH" ] || die "linux-headers tidak ditemukan di indeks"
