@@ -95,6 +95,21 @@ for dep in $DEPS; do
     fi
 done
 
+# Validasi patchelf benar-benar bisa jalan (bukan cuma ada).
+# Skew patchelf (NDK r30) vs libc++ lama memicu:
+#   CANNOT LINK EXECUTABLE "patchelf": cannot locate symbol
+#   "_ZNSt6__ndk113__hash_memory" — baru meledak di bootstrap.sh
+# tahap rewrite_interp (7 file gagal). Perbaikan: upgrade paketnya.
+if ! patchelf --version >/dev/null 2>&1; then
+    warn "patchelf ada tapi tidak bisa jalan (skew libc++) — upgrade libc++ patchelf..."
+    pkg upgrade -y libc++ patchelf 2>/dev/null \
+        || pkg install -y libc++ patchelf \
+        || die "Gagal upgrade libc++ patchelf. Jalankan manual: pkg upgrade -y"
+    patchelf --version >/dev/null 2>&1 \
+        || die "patchelf tetap rusak setelah upgrade. Jalankan manual: pkg upgrade -y"
+fi
+log "patchelf bisa jalan: $(patchelf --version 2>/dev/null)"
+
 # ========== Clone/Pilih Repo ==========
 step "Setup Repository"
 

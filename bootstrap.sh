@@ -62,6 +62,13 @@ done
 for c in clang curl tar gzip grep od sha256sum strip readelf patchelf; do
     command -v "$c" >/dev/null 2>&1 || die "butuh: $c (pkg install clang binutils patchelf ...)"
 done
+# Fail-fast: patchelf yang skew (NDK r30) vs libc++ lama terlihat "ada" tapi
+# gagal link saat dipakai rewrite_interp:
+#   CANNOT LINK EXECUTABLE "patchelf": cannot locate symbol
+#   "_ZNSt6__ndk113__hash_memory". Obatnya di host: `pkg upgrade -y`
+# (atau minimal `pkg upgrade -y libc++ patchelf`).
+patchelf --version >/dev/null 2>&1 \
+    || die "patchelf rusak (skew libc++). Jalankan dulu: pkg upgrade -y"
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 SRCFAKE="$SRC/fake-run"; SRCSVSP="$SRC/svsp.c"; SRCSHIM="$SRC/libfakeroot.c"; SRCPINT="$SRC/pinterp.c"
