@@ -81,10 +81,16 @@ fi
 # ========== Install Dependencies ==========
 step "Install Dependencies"
 
-info "Update package list..."
-pkg update -y 2>/dev/null || true
+# Headless / non-interaktif: jangan pernah berhenti nanya Y/N.
+export DEBIAN_FRONTEND=noninteractive
 
-DEPS="clang binutils patchelf curl"
+info "Update package list..."
+pkg update || true
+
+info "Upgrade semua paket (headless)..."
+pkg upgrade -y -o Dpkg::Options::="--force-confold" || pkg upgrade -y || true
+
+DEPS="clang binutils patchelf curl git"
 for dep in $DEPS; do
     if command -v "$dep" >/dev/null 2>&1; then
         log "$dep sudah ada"
