@@ -8,6 +8,7 @@
 #   alpine apk add vim        # jalankan apk langsung
 #   alpine update             # tarik update repo + pasang ulang alat
 #   alpine ports              # daftar port app + deteksi bentrok
+#   alpine ps                 # proses yang jalan di dalam wadah (PID + status)
 #
 # CATATAN: dari DALAM shell wadah (prompt `alpine:~❯`) perintah ini tak
 # ada — `alpine` hidup di host Termux ($PREFIX/bin). Untuk update/ports dari
@@ -206,6 +207,39 @@ elif [ "$1" = "ports" ]; then
     warn_conflict "opencode (wadah)" "$ocp" "opencode (host)" "49374"
 
     printf '\n  %sRingkasan: opencode wadah=%s, default host=49374%s\n' "$D" "${ocp:-belum diatur}" "$N"
+    echo
+elif [ "$1" = "ps" ]; then
+    # ------------------------------------------------- alpine ps
+    # Proses yang jalan DI DALAM wadah: PID + status + perintah.
+    # Kernel milik host (Android) sehingga `ps` biasa menampilkan SEMUA
+    # proses Termux; di sini disaring hanya yang perintahnya menyentuh
+    # $BASE (binary wadah, loader patched, atau svsp pemilik wadah ini).
+    # Path host $BASE/... dipendekkan jadi path wadah /... agar muat layar HP.
+    shift
+    G=$'\033[38;2;0;255;0m'; O=$'\033[38;2;255;135;0m'; D=$'\033[2;38;2;0;170;0m'; N=$'\033[0m'
+    printf '\n%s  Proses di dalam wadah%s  %s(%s)%s\n\n' "$G" "$N" "$D" "$BASE" "$N"
+    printf '  %s%-8s %-5s %s%s\n' "$O" "PID" "STAT" "COMMAND" "$N"
+    n=0
+    while IFS= read -r line; do
+        case "$line" in *"$BASE/"*) ;; *) continue ;; esac
+        # format busybox: PID(spasi*)STAT(spasi*)ARGS — potong 2 kolom depan
+        pid="${line%% *}"; rest="${line#* }"
+        rest="$(printf '%s' "$rest" | sed 's/^ *//')"
+        st="${rest%% *}"; cmd="${rest#* }"
+        cmd="$(printf '%s' "$cmd" | sed 's/^ *//')"
+        # pendekkan: awalan $BASE/ -> /, sisa kemunculan -> (wadah)
+        case "$cmd" in "$BASE"*) cmd="/${cmd#"$BASE"/}";; esac
+        cmd="$(printf '%s' "$cmd" | sed "s|$BASE|(wadah)|g")"
+        # invokasi via loader eksplisit: buang argv[0] loader, tampilkan targetnya
+        case "$cmd" in /lib/ld-musl-patched.so.1\ *) cmd="${cmd#/lib/ld-musl-patched.so.1 }";; esac
+        printf '  %-8s %-5s %s\n' "$pid" "$st" "$cmd"
+        n=$((n+1))
+    done < <(ps -o pid,stat,args 2>/dev/null | tail -n +2)
+    if [ "$n" -eq 0 ]; then
+        printf '\n  %stidak ada proses wadah yang jalan%s\n' "$D" "$N"
+    else
+        printf '\n  %s%d proses wadah%s\n' "$D" "$n" "$N"
+    fi
     echo
 elif [ "$1" = "-c" ]; then
     # alpine -c "command" — jalankan command string di dalam wadah
