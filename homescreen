@@ -1,0 +1,20 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# homescreen — EXPERIMENTAL: masuk GUI terminal (desktop ala GUI di CLI).
+#
+#   homescreen            # buka desktop interaktif
+#   homescreen --list     # daftar tile polos
+#
+# Implementasi tunggal: experiments/homescreen.mjs (Node, nol-dep).
+# Skrip ini cuma penerus + pencari lokasi repo.
+# Pasang: cp homescreen $PREFIX/bin/   (atau symlink)
+set -euo pipefail
+
+SRC=""
+for cand in "${BASH_SOURCE[0]%/*}" "$HOME/Brainstorming" "/data/data/com.termux/files/home/Brainstorming"; do
+    if [ -f "$cand/experiments/homescreen.mjs" ]; then SRC="$cand"; break; fi
+done
+[ -n "$SRC" ] || { echo "homescreen: repo Brainstorming tak ditemukan" >&2; exit 1; }
+
+NODE="node"
+command -v node >/dev/null 2>&1 || NODE="/data/data/com.termux/files/usr/bin/node"
+exec "$NODE" "$SRC/experiments/homescreen.mjs" "$@"
