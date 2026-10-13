@@ -161,7 +161,7 @@ elif [ "$1" = "update" ]; then
     ( cd "$SRC" && ./bootstrap.sh ) || { echo "bootstrap gagal — lihat output di atas" >&2; exit 1; }
     echo
     echo "▌ salin ulang skrip ke $PREFIX/bin"
-    for f in alpine app; do
+    for f in alpine app homescreen; do
         [ -f "$SRC/$f" ] && cp "$SRC/$f" "$PREFIX/bin/$f" && chmod 0755 "$PREFIX/bin/$f"
     done
     [ -f "$SRC/fake-run" ] && cp "$SRC/fake-run" "$PREFIX/bin/fake-run" && chmod 0755 "$PREFIX/bin/fake-run"
