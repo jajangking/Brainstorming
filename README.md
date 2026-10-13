@@ -24,6 +24,8 @@ Fresh install sudah brings working toolchain — tak perlu `apk add` manual:
 | `libstdc++` + `libgcc` | binary C++ pihak-ketiga (opencode, bun) butuh `libstdc++.so.6`; minirootfs tidak menyertakan |
 | `curl`, `bash`, `git` | peralatan standar (bawaan wadah cuma busybox `ash`) |
 | Node.js / Python / ripgrep | bisa dipasang sendiri lewat `apk` atau tool manager (Hermes Agent, dsb) |
+| `build-base` | toolchain C (gcc, make, libc-dev) — kompilasi binary C dari source |
+| `musl-dev` | header C untuk kompilasi statis dinamis (libc-dev untuk musl) |
 
 Kalau binary besar (>64 MB, mis. opencode ~195 MB) terunduh **setelah** bootstrap,
 jalankan `./bootstrap.sh` sekali lagi (idempoten) agar PT_INTERP-nya ikut di-rewrite
@@ -114,6 +116,23 @@ belum terpasang tampil redup dan tak bisa dijalankan. Tambah app baru = tambah 1
 | Wrapper loader otomatis (§43) | `~/alpine-rootfs/.svsp-elfwrap/` |
 | Config Claude | `~/alpine-rootfs/root/.claude` |
 | Config opencode | `~/alpine-rootfs/root/.config/opencode/service.json` (port 49474) |
+
+## 🛠️ Script & Tool Pembantu
+
+| Nama | Guna | Path |
+|---|---|---|
+| `selftest` | Verifikasi lengkap wadah (shim + svsp + apk-doctor) | `$PREFIX/bin/selftest` |
+| `apk-doctor` | Diagnosa & perbaiki database apk-tools | `$PREFIX/bin/apk-doctor` |
+| `alpine` | Masuk shell wadah Alpine (alias `fake-run`) | `$PREFIX/bin/alpine` |
+| `app` | Launcher aplikasi TUI (grid ikon) | `$PREFIX/bin/app` |
+| `fake-run` | Runner universal (shim/svsp auto-detect) | `$PREFIX/bin/fake-run` |
+| `hermes-setup` | Orkestrator install/finishing Hermes Agent | `$PREFIX/bin/hermes-setup` |
+| `hermes-reinstall` | Rebuild Node deps Hermes Agent (skip lefthook) | `$PREFIX/bin/hermes-reinstall` |
+| `hermes-web-build` | Build web_dist Hermes (split-phase) | `$PREFIX/bin/hermes-web-build` |
+| `hermes-nodeps-driver.py` | Driver `hermes-reinstall` (activation env) | `$PREFIX/bin/hermes-nodeps-driver.py` |
+| `node-wrap` | Wrapper Node (fallback `networkInterfaces()` ke loopback) | `$PREFIX/bin/node-wrap` |
+| `ps-wrap` | Wrapper `ps` untuk `lstart` (codex/Hermes lock) | `$PREFIX/bin/ps-wrap` |
+| `web-split.mjs` | Split-phase web build (typecheck + vite) | `$PREFIX/bin/web-split.mjs` |
 
 ## ❓ Apa Bedanya dengan proot-distro / Termux?
 
